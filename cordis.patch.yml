@@ -1,0 +1,18 @@
+# fx-tui bundle patch: the interactive terminal surface over the dsh-base layer.
+# Rows here override dsh-base rows by id (a patch replaces the whole config of
+# the targeted row); the insert row mounts this package's runner plugin.
+
+# The TUI owns the terminal from mount to exit; hot reload would unmount the
+# Ink app mid-flight, so the watcher stays off (mirrors dsh-headless).
+- id: hmr
+  disabled: true
+
+# The fx-tui deployment persona (the base persona is empty).
+- id: system-prompt
+  config:
+    persona: 'You are fx-tui, an interactive coding agent running in a terminal UI. Keep answers compact and terminal-friendly: prefer short markdown, avoid wide tables, and state file paths plainly.'
+
+# The runner: creates (or resumes) the agent and mounts the Ink app.
+- insert:
+    - id: fx-tui
+      name: fx-tui
