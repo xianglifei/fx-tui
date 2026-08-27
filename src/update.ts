@@ -98,9 +98,11 @@ async function git(root: string, args: string, timeoutMs = QUICK_TIMEOUT_MS): Pr
 /**
  * pnpm resolution inside the spawned shell: plain pnpm first, corepack's shim
  * when pnpm is missing. login shell (-l) keeps PATH sane for GUI-launched fx.
+ * Uses an if-list because POSIX grammar forbids trailing words after a
+ * subshell — the earlier `(a && b || c) args` form never parsed at all.
  */
 function pnpmCommand(args: string): string {
-  return '(command -v pnpm >/dev/null 2>&1 && exec pnpm || exec corepack pnpm) ' + args
+  return `if command -v pnpm >/dev/null 2>&1; then pnpm ${args}; else corepack pnpm ${args}; fi`
 }
 
 export async function performSelfUpdate(options: {

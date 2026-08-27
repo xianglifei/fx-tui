@@ -3,6 +3,21 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.11.1] - 2026-08-27
+
+### 修复：/update 安装阶段 shell 语法错误
+
+- **问题**：首次有用户在干净工作区真正跑完 fetch/快进合并后，升级在第 5 阶段崩掉：
+  `(… && exec pnpm || …) install` 被 POSIX shell 判为非法——子 shell 复合命令
+  `( )` 之后不允许直接跟裸参数，属纯语法错误，与用户环境无关。此前的冒烟验证
+  因脏工作区拦截与「已是最新」短路都未触及该字符串，漏测到线上
+- **修复**：改为 if 列表结构 `if command -v pnpm …; then pnpm <args>; else
+  corepack pnpm <args>; fi`，两个分支均实测：参数透传正确、corepack 兜底可达；
+  版本号升至 0.11.1
+- **受影响用户的恢复路径**：他们的仓库已快进到出错前的最新提交、但依赖与构建产物
+  未更新——拉取本修复后直接再跑一次 `/update` 即可；或立即手动执行
+  `cd ~/fx-tui && pnpm install && pnpm run build`（之后也能正常用 /update）
+
 ## [0.11.0] - 2026-08-27
 
 ### 后台自动更新
