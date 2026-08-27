@@ -19,12 +19,15 @@ export interface StatusBarProps {
   reasoningChars: number
   model: string
   sessionId: string
+  contextTokens: number
+  contextWindow?: number
 }
 
 export function StatusBar(props: StatusBarProps): ReactElement {
   const [tick, setTick] = useState(0)
   const { stdout } = useStdout()
-  const width = Math.max(24, (stdout?.columns ?? 80) - 2)
+  const columns = stdout?.columns
+  const width = Math.max(24, (columns !== undefined && columns > 0 ? columns : 80) - 2)
   const active = props.phase !== 'idle'
   useEffect(() => {
     if (!active) return
@@ -41,7 +44,32 @@ export function StatusBar(props: StatusBarProps): ReactElement {
         ? '执行工具'
         : '就绪'
 
-  const right = `${props.model}${props.usage !== '' ? ` · ${props.usage}` : ''} · ${props.sessionId.slice(0, 13)}`
+  const context = contextText(props.contextTokens, props.contextWindow)
+  // Right side degrades from lowest priority (session id, usage) so the
+  // model name and context level survive narrow terminals.
+  const parts: Array<{ text: string; priority: number }> = [
+    { text: props.model, priority: 4 },
+    { text: context, priority: 3 },
+    { text: props.usage, priority: 2 },
+    { text: props.sessionId.slice(0, 13), priority: 1 },
+  ]
+  const kept = parts.map(p => p.text)
+  const fits = (): boolean => stringWidth(kept.filter(t => t !== '').join(' · ')) <= width - 10
+  while (!fits()) {
+    let dropIdx = -1
+    let dropPriority = Number.MAX_SAFE_INTEGER
+    for (let i = kept.length - 1; i >= 0; i--) {
+      const text = kept[i]
+      if (text === '') continue
+      if (parts[i]!.priority < dropPriority) {
+        dropPriority = parts[i]!.priority
+        dropIdx = i
+      }
+    }
+    if (dropIdx < 0) break
+    kept[dropIdx] = ''
+  }
+  const right = kept.filter(t => t !== '').join(' · ')
   const budget = Math.max(12, width - stringWidth(right) - 4)
 
   let left = ` ${label}`
@@ -72,4 +100,13 @@ function formatCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
   return String(n)
+}
+
+/** Context water-level text like `上下文 45%·58k/128k`; empty before any measurement. */
+function contextText(tokens: number, window: number | undefined): string {
+  if (tokens <= 0) return ''
+  const used = formatCount(tokens)
+  if (window === undefined || window <= 0) return `上下文 ~${used}`
+  const percent = Math.round((tokens / window) * 100)
+  return `上下文 ${percent}%·${used}/${formatCount(window)}`
 }

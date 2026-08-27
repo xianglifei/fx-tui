@@ -18,6 +18,8 @@ export interface InputBoxProps {
   store: TuiStore
   history: readonly string[]
   frozen: boolean
+  /** A pending free-text question: Enter answers it instead of sending a message. */
+  questionFreeText: boolean
   onSubmit(text: string): void
   onInterrupt(): void
   onExit(): void
@@ -30,11 +32,11 @@ interface EditorState {
 }
 
 const HELP_TEXT =
-  'Enter 发送 · Ctrl+J 换行 · ↑↓ 翻输入历史 · Esc 中断/清空 · ' +
+  'Enter 发送 · Ctrl+J 换行 · ↑↓ 翻输入历史 · Esc 中断/清空 · Ctrl+O 工具详情切换 · ' +
   'Ctrl+C 清空，空输入时双击退出 · /exit 退出 · /help 帮助'
 
 export function InputBox(props: InputBoxProps): ReactElement {
-  const { store, history, frozen, onSubmit, onInterrupt, onExit } = props
+  const { store, history, frozen, questionFreeText, onSubmit, onInterrupt, onExit } = props
   const [ed, setEd] = useState<EditorState>({ lines: [''], row: 0, col: 0 })
   const [histIdx, setHistIdx] = useState(-1)
   const [draft, setDraft] = useState<string | null>(null)
@@ -58,6 +60,10 @@ export function InputBox(props: InputBoxProps): ReactElement {
     }
 
     if (key.escape) {
+      if (questionFreeText) {
+        store.skipQuestion()
+        return
+      }
       if (store.getSnapshot().phase !== 'idle') {
         onInterrupt()
       } else if (!isEmpty) {
@@ -83,6 +89,11 @@ export function InputBox(props: InputBoxProps): ReactElement {
 
     if (key.return) {
       submit()
+      return
+    }
+
+    if (key.ctrl && input === 'o') {
+      store.toggleVerboseToolDetail()
       return
     }
 
@@ -212,14 +223,37 @@ export function InputBox(props: InputBoxProps): ReactElement {
       setEd({ lines: [''], row: 0, col: 0 })
       setHistIdx(-1)
       setDraft(null)
-      submitText(next.lines.join('\n'))
+      const submitted = next.lines.join('\n').trim()
+      if (submitted === '') return
+      if (questionFreeText) {
+        if (submitted === '/exit' || submitted === '/quit') {
+          onExit()
+          return
+        }
+        store.submitFreeTextAnswer(submitted)
+        return
+      }
+      submitText(submitted)
     } else {
       setEd(next)
     }
   }
 
   function submit(): void {
-    submitText(ed.lines.join('\n'))
+    const text = ed.lines.join('\n').trim()
+    if (text === '') return
+    if (questionFreeText) {
+      if (text === '/exit' || text === '/quit') {
+        onExit()
+        return
+      }
+      store.submitFreeTextAnswer(text)
+      setEd({ lines: [''], row: 0, col: 0 })
+      setHistIdx(-1)
+      setDraft(null)
+      return
+    }
+    submitText(text)
   }
 
   function submitText(text: string): void {
@@ -263,7 +297,9 @@ export function InputBox(props: InputBoxProps): ReactElement {
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={frozen ? 'gray' : 'cyan'} paddingX={1}>
       {isEmpty && histIdx === -1 && (
-        <Text dimColor>说点什么…（Enter 发送 · Ctrl+J 换行 · /help 查看按键）</Text>
+        <Text dimColor>
+          {questionFreeText ? '输入你的回答，Enter 提交（Esc 跳过）…' : '说点什么…（Enter 发送 · Ctrl+J 换行 · /help 查看按键）'}
+        </Text>
       )}
       {ed.lines.map((line, index) => (
         <Text key={index}>

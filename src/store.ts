@@ -6,24 +6,61 @@
  * Ink's Static region; streaming text and pending tool calls stay in the
  * dynamic region until they settle. Chunk events are batched on a flush
  * interval so high-frequency token streams do not thrash React renders.
+ *
+ * Tool cards prefer the tools' own presentation views (presentCall /
+ * presentResult) when a presenter bridge is installed; they degrade to raw
+ * name/args/text otherwise.
  */
 
-import type { TokenUsage } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, ToolResultMessage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { AskUserQuestionAnswer, AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
+import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
+
+// -- Transcript items ---------------------------------------------------------
 
 export interface UserItem { readonly kind: 'user'; readonly text: string }
 export interface AssistantItem { readonly kind: 'assistant'; readonly text: string; readonly interrupted: boolean }
-export interface ToolItem { readonly kind: 'tool'; readonly name: string; readonly args: string; readonly ok: boolean; readonly result: string }
+
+export interface ToolItem {
+  readonly kind: 'tool'
+  readonly name: string
+  readonly title: string
+  readonly args: string
+  readonly ok: boolean
+  readonly result: string
+  readonly elapsedMs: number
+  readonly exitCode?: number
+  readonly signal?: string
+  readonly view?: ToolResultView
+  readonly verbose: boolean
+}
+
 export interface NoticeItem { readonly kind: 'notice'; readonly text: string; readonly tone: 'info' | 'error' | 'warn' }
 export type FinalItem = UserItem | AssistantItem | ToolItem | NoticeItem
 
-export interface PendingTool { readonly callId: string; readonly name: string; readonly args: string }
+export interface PendingTool {
+  readonly callId: string
+  readonly name: string
+  readonly title: string
+  readonly args: string
+  readonly startedAt: number
+}
 
 export interface ApprovalPrompt {
   readonly seq: number
   readonly toolName: string
   readonly reason: string
+  readonly command?: string
+}
+
+export type ApprovalChoice = 'once' | 'session' | 'always' | 'reject'
+
+export interface ActiveQuestion {
+  readonly item: AskUserQuestionItem
+  readonly selected: readonly string[]
+  readonly index: number
+  readonly total: number
 }
 
 export type Phase = 'idle' | 'thinking' | 'streaming' | 'tool'
@@ -38,9 +75,24 @@ export interface Snapshot {
   readonly usage: string
   readonly reasoningChars: number
   readonly approval: ApprovalPrompt | null
+  readonly question: ActiveQuestion | null
+  readonly questionFreeText: boolean
+  readonly contextTokens: number
+  readonly contextWindow?: number
+  readonly verboseToolDetail: boolean
   readonly exitArmed: boolean
   readonly sessionId: string
   readonly model: string
+}
+
+/** Bridge to the tools registry's presentation layer; optional. */
+export interface ToolPresenter {
+  presentCall(name: string, rawArgs: string): ToolCallView | undefined
+  presentResult(name: string, rawArgs: string, result: {
+    content: readonly ContentBlock[]
+    isError: boolean
+    meta: unknown
+  }): ToolResultView | undefined
 }
 
 const FLUSH_INTERVAL_MS = 60
@@ -57,8 +109,15 @@ export class TuiStore {
   private usage = ''
   private reasoningChars = 0
   private approval: ApprovalPrompt | null = null
-  private approvalResolve: ((outcome: 'allowed-once' | 'rejected') => void) | null = null
+  private approvalResolve: ((choice: ApprovalChoice) => void) | null = null
   private approvalSeq = 0
+  private questionQueue: AskUserQuestionItem[] = []
+  private questionAnswers: AskUserQuestionAnswerItem[] = []
+  private questionActive: ActiveQuestion | null = null
+  private questionResolve: ((answer: AskUserQuestionAnswer) => void) | null = null
+  private contextTokens = 0
+  private contextWindow: number | undefined
+  private verboseToolDetail = false
   private exitArmed = false
   private exitTimer: ReturnType<typeof setTimeout> | null = null
   private echoedId: string | null = null
@@ -67,7 +126,11 @@ export class TuiStore {
   private readonly listeners = new Set<() => void>()
   private flushTimer: ReturnType<typeof setInterval> | null = null
 
-  constructor(readonly sessionId: string, readonly model: string) {
+  constructor(
+    readonly sessionId: string,
+    readonly model: string,
+    private readonly presenter?: ToolPresenter,
+  ) {
     this.rebuild()
   }
 
@@ -91,6 +154,11 @@ export class TuiStore {
       usage: this.usage,
       reasoningChars: this.reasoningChars,
       approval: this.approval,
+      question: this.questionActive,
+      questionFreeText: this.questionActive !== null && (this.questionActive.item.options ?? []).length === 0,
+      contextTokens: this.contextTokens,
+      contextWindow: this.contextWindow,
+      verboseToolDetail: this.verboseToolDetail,
       exitArmed: this.exitArmed,
       sessionId: this.sessionId,
       model: this.model,
@@ -173,13 +241,16 @@ export class TuiStore {
       }
       case 'tool/call': {
         this.finalizeStream(false)
+        const view = this.presenter?.presentCall(ev.data.name, ev.data.arguments)
         this.pendingTools.set(ev.data.callId, {
           callId: ev.data.callId,
           name: ev.data.name,
+          title: callViewTitle(view) ?? ev.data.name,
           args: ev.data.arguments,
+          startedAt: ev.time,
         })
         this.phase = 'tool'
-        this.phaseDetail = ev.data.name
+        this.phaseDetail = callViewTitle(view) ?? ev.data.name
         break
       }
       case 'tool/result': {
@@ -187,15 +258,33 @@ export class TuiStore {
         const callId = toolResultCallId(data.message)
         const pending = callId !== undefined ? this.pendingTools.get(callId) : undefined
         if (callId !== undefined) this.pendingTools.delete(callId)
+        const view = pending !== undefined && this.presenter !== undefined
+          ? this.presenter.presentResult(pending.name, pending.args, {
+              content: resultBlocks(data.message),
+              isError: data.error !== undefined,
+              meta: data.meta,
+            })
+          : undefined
+        const exit = view?.card === 'terminal' ? view : undefined
         this.items.push({
           kind: 'tool',
           name: pending?.name ?? '(unknown tool)',
+          title: view?.title ?? pending?.title ?? (pending?.name ?? '(unknown tool)'),
           args: pending?.args ?? '',
           ok: data.error === undefined,
           result: toolResultText(data.message, data.error),
+          elapsedMs: pending !== undefined ? Math.max(0, ev.time - pending.startedAt) : 0,
+          exitCode: exit?.exitCode,
+          signal: exit?.signal,
+          view,
+          verbose: this.verboseToolDetail,
         })
         this.phase = 'thinking'
         this.phaseDetail = ''
+        break
+      }
+      case 'request/context': {
+        if (ev.data.contextWindow !== undefined) this.contextWindow = ev.data.contextWindow
         break
       }
       case 'turn/end': {
@@ -232,7 +321,10 @@ export class TuiStore {
   /** Convert leftover pending tools (interrupted history) into final cards. */
   finishReplay(): void {
     for (const tool of this.pendingTools.values()) {
-      this.items.push({ kind: 'tool', name: tool.name, args: tool.args, ok: true, result: '(结果未记录)' })
+      this.items.push({
+        kind: 'tool', name: tool.name, title: tool.title, args: tool.args,
+        ok: true, result: '(结果未记录)', elapsedMs: 0, verbose: this.verboseToolDetail,
+      })
     }
     this.pendingTools.clear()
     this.phase = 'idle'
@@ -283,34 +375,154 @@ export class TuiStore {
     this.commit()
   }
 
+  toggleVerboseToolDetail(): boolean {
+    this.verboseToolDetail = !this.verboseToolDetail
+    this.addNotice(this.verboseToolDetail
+      ? '工具详情已切换为完整显示（影响之后完成的卡片）'
+      : '工具详情已切换为摘要显示（影响之后完成的卡片）')
+    return this.verboseToolDetail
+  }
+
+  /** Context pressure from the token meter; window comes from request/context events. */
+  setContextPressure(tokens: number): void {
+    this.contextTokens = tokens
+    this.commit()
+  }
+
+  /** Raw args of a pending call, for approval memory keys and prompts. */
+  pendingToolFor(callId: string | undefined): PendingTool | undefined {
+    if (callId === undefined) return undefined
+    return this.pendingTools.get(callId)
+  }
+
   // -- Approval bridge -----------------------------------------------------
 
-  askApproval(req: { toolName: string; reason: string }): Promise<'allowed-once' | 'rejected'> {
+  askApproval(req: { toolName: string; reason: string; command?: string }): Promise<ApprovalChoice> {
     return new Promise(resolve => {
       this.approvalSeq += 1
-      this.approval = { seq: this.approvalSeq, toolName: req.toolName, reason: req.reason }
+      this.approval = { seq: this.approvalSeq, toolName: req.toolName, reason: req.reason, command: req.command }
       this.approvalResolve = resolve
       this.commit()
     })
   }
 
-  answerApproval(outcome: 'allowed-once' | 'rejected'): void {
+  answerApproval(choice: ApprovalChoice): void {
     if (this.approvalResolve === null) return
     const resolve = this.approvalResolve
     const toolName = this.approval?.toolName ?? '(tool)'
     this.approvalResolve = null
     this.approval = null
+    const label = choice === 'once' ? '已允许（本次）'
+      : choice === 'session' ? '已允许（本会话内同类调用不再询问）'
+        : choice === 'always' ? '已允许（已写入记忆，之后自动放行）'
+          : '已拒绝'
     this.items.push({
       kind: 'notice',
-      tone: outcome === 'allowed-once' ? 'info' : 'warn',
-      text: outcome === 'allowed-once' ? `已允许 ${toolName}（本次）` : `已拒绝 ${toolName}`,
+      tone: choice === 'reject' ? 'warn' : 'info',
+      text: `${label} ${toolName}`,
     })
     this.commit()
-    resolve(outcome)
+    resolve(choice)
+  }
+
+  /** Withdraw a pending approval prompt (request aborted upstream). */
+  cancelApproval(): void {
+    if (this.approvalResolve === null) return
+    this.approvalResolve = null
+    this.approval = null
+    this.commit()
+  }
+
+  // -- User-questions bridge -------------------------------------------------
+
+  askQuestions(items: readonly AskUserQuestionItem[]): Promise<AskUserQuestionAnswer> {
+    return new Promise(resolve => {
+      this.questionQueue = [...items]
+      this.questionAnswers = []
+      this.questionResolve = resolve
+      this.advanceQuestion()
+    })
+  }
+
+  toggleQuestionOption(label: string): void {
+    const active = this.questionActive
+    if (active === null) return
+    const selected = active.item.multiSelect === true
+      ? (active.selected.includes(label)
+          ? active.selected.filter(l => l !== label)
+          : [...active.selected, label])
+      : [label]
+    this.questionActive = { ...active, selected }
+    this.commit()
+  }
+
+  /** Confirm the option selection for the active question. */
+  confirmQuestion(): void {
+    const active = this.questionActive
+    if (active === null) return
+    if (active.selected.length === 0) return
+    this.questionAnswers.push({ id: active.item.id, selected: [...active.selected] })
+    this.advanceQuestion()
+  }
+
+  /** Free-text answer for the active question (typed in the main input box). */
+  submitFreeTextAnswer(text: string): void {
+    const active = this.questionActive
+    if (active === null) return
+    const trimmed = text.trim()
+    if (trimmed === '') return
+    this.questionAnswers.push({ id: active.item.id, selected: [], custom: trimmed })
+    this.advanceQuestion()
+  }
+
+  /** Skip the active question with no selection. */
+  skipQuestion(): void {
+    const active = this.questionActive
+    if (active === null) return
+    this.questionAnswers.push({ id: active.item.id, selected: [] })
+    this.advanceQuestion()
+  }
+
+  /** Withdraw the whole pending questionnaire (request aborted upstream). */
+  cancelQuestions(): void {
+    if (this.questionResolve === null) return
+    const resolve = this.questionResolve
+    this.questionResolve = null
+    this.questionActive = null
+    this.questionQueue = []
+    this.questionAnswers = []
+    this.commit()
+    resolve({ answers: [] })
+  }
+
+  private advanceQuestion(): void {
+    const next = this.questionQueue.shift()
+    if (next === undefined) {
+      const resolve = this.questionResolve
+      this.questionResolve = null
+      this.questionActive = null
+      this.commit()
+      resolve?.({ answers: this.questionAnswers })
+      return
+    }
+    this.questionActive = {
+      item: next,
+      selected: [],
+      index: this.questionAnswers.length + 1,
+      total: this.questionAnswers.length + 1 + this.questionQueue.length,
+    }
+    this.commit()
   }
 }
 
 // -- Helpers -----------------------------------------------------------------
+
+function callViewTitle(view: ToolCallView | undefined): string | undefined {
+  return view?.card === 'generic' ? view.title
+    : view?.card === 'terminal' ? view.title
+      : view?.card === 'diff' ? view.title
+        : undefined
+}
 
 function blocksToText(content: readonly ContentBlock[]): string {
   let text = ''
@@ -320,8 +532,17 @@ function blocksToText(content: readonly ContentBlock[]): string {
   return text
 }
 
+function resultBlocks(message: ToolResultMessage): readonly ContentBlock[] {
+  const blocks: ContentBlock[] = []
+  for (const block of message.content as readonly ContentBlock[]) {
+    if (block.type === 'tool-result') blocks.push(...block.content)
+    else blocks.push(block)
+  }
+  return blocks
+}
+
 function toolResultCallId(message: ToolResultMessage): string | undefined {
-  for (const block of message.content) {
+  for (const block of message.content as readonly ContentBlock[]) {
     if (block.type === 'tool-result') return block.toolCallId
   }
   return undefined
@@ -359,4 +580,55 @@ function formatCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
   return String(n)
+}
+
+/** Compact one-line preview of raw tool arguments. */
+export function formatToolArgs(args: string, limit: number): string {
+  if (args === '') return ''
+  let preview = args
+  try {
+    const parsed: unknown = JSON.parse(args)
+    if (typeof parsed === 'object' && parsed !== null) {
+      const entries = Object.entries(parsed as Record<string, unknown>)
+      preview = entries
+        .slice(0, 4)
+        .map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`)
+        .join(' ')
+      if (entries.length > 4) preview += ` …（${entries.length - 4} 个参数已省略）`
+    }
+  } catch {
+    // raw JSON string as produced by the model — keep as-is
+  }
+  return truncateLine(preview, limit)
+}
+
+function truncateLine(line: string, width: number): string {
+  if (line === '') return ''
+  let out = ''
+  let w = 0
+  for (const ch of Array.from(line)) {
+    const cw = charWidth(ch)
+    if (w + cw > width) return `${out}…`
+    out += ch
+    w += cw
+  }
+  return out
+}
+
+function charWidth(ch: string): number {
+  const code = ch.codePointAt(0) ?? 0
+  if (
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x2e80 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x20000 && code <= 0x2fffd) ||
+    (code >= 0x30000 && code <= 0x3fffd)
+  ) {
+    return 2
+  }
+  return 1
 }

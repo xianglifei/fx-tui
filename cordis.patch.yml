@@ -13,6 +13,11 @@
     persona: 'You are fx-tui, an interactive coding agent running in a terminal UI. Keep answers compact and terminal-friendly: prefer short markdown, avoid wide tables, and state file paths plainly.'
 
 # The runner: creates (or resumes) the agent and mounts the Ink app.
+# tool-ask-user gives the model ask_user_question, which pauses the tool call
+# until our user-questions provider returns the keyboard answer.
 - insert:
+    - id: tool-ask-user
+      name: '@deepseek-ai/dsh-tool-ask-user'
+
     - id: fx-tui
       name: fx-tui

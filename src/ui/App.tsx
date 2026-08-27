@@ -1,13 +1,22 @@
 /**
  * The Ink root: Static region for the settled transcript, dynamic region for
- * pending tools, the streaming reply, the approval prompt, status line, and
- * the input editor.
+ * pending tools, the streaming reply, approval/question prompts, status line,
+ * and the input editor.
  */
 
 import { useSyncExternalStore } from 'react'
 import type { ReactElement } from 'react'
 import { Box, Static, Text, useInput, useStdout } from 'ink'
-import type { ApprovalPrompt, FinalItem, PendingTool, TuiStore, ToolItem } from '../store.js'
+import type {
+  ActiveQuestion,
+  ApprovalPrompt,
+  FinalItem,
+  PendingTool,
+  TuiStore,
+  ToolItem,
+} from '../store.js'
+import { formatToolArgs } from '../store.js'
+import { renderFileDiffs } from '../diff.js'
 import { renderMarkdownLines } from '../markdown.js'
 import { InputBox } from './Input.js'
 import { StatusBar } from './StatusBar.js'
@@ -29,6 +38,7 @@ export function App(props: AppProps): ReactElement {
   const { stdout } = useStdout()
   const columns = stdout?.columns
   const width = Math.max(24, (columns !== undefined && columns > 0 ? columns : 80) - 2)
+  const frozen = snap.approval !== null || (snap.question !== null && !snap.questionFreeText)
 
   return (
     <Box flexDirection="column">
@@ -37,10 +47,16 @@ export function App(props: AppProps): ReactElement {
       </Static>
       <Box flexDirection="column">
         {snap.pendingTools.map((tool: PendingTool) => (
-          <Text key={tool.callId} color="yellow">{`⚙ ${tool.name} 运行中…`}</Text>
+          <PendingToolView key={tool.callId} tool={tool} width={width} />
         ))}
         {snap.streaming !== '' && <StreamView text={snap.streaming} width={width} />}
         {snap.approval !== null && <ApprovalView store={props.store} prompt={snap.approval} />}
+        {snap.question !== null && !snap.questionFreeText && (
+          <QuestionView store={props.store} question={snap.question} width={width} />
+        )}
+        {snap.question !== null && snap.questionFreeText && (
+          <FreeTextQuestionView question={snap.question} />
+        )}
         <StatusBar
           phase={snap.phase}
           detail={snap.phaseDetail}
@@ -48,11 +64,14 @@ export function App(props: AppProps): ReactElement {
           reasoningChars={snap.reasoningChars}
           model={snap.model}
           sessionId={snap.sessionId}
+          contextTokens={snap.contextTokens}
+          contextWindow={snap.contextWindow}
         />
         <InputBox
           store={props.store}
           history={props.history}
-          frozen={snap.approval !== null}
+          frozen={frozen}
+          questionFreeText={snap.question !== null && snap.questionFreeText}
           onSubmit={props.actions.onSubmit}
           onInterrupt={props.actions.onInterrupt}
           onExit={props.actions.onExit}
@@ -97,22 +116,214 @@ function FinalItemView(props: { item: FinalItem; width: number }): ReactElement 
   }
 }
 
+function PendingToolView(props: { tool: PendingTool; width: number }): ReactElement {
+  return (
+    <Text color="yellow">{`⚙ ${props.tool.title} 运行中…`}</Text>
+  )
+}
+
 function ToolCardView(props: { item: ToolItem; width: number }): ReactElement {
   const { item, width } = props
   const color = item.ok ? 'green' : 'red'
+  const view = item.view
+  const border = view?.card === 'diff' ? 'green' : color
+
+  if (view !== undefined && view.card === 'diff') {
+    const lines = renderFileDiffs(view.diffs)
+    const shown = item.verbose ? lines : lines.slice(0, 24)
+    const more = lines.length - shown.length
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor={border} paddingX={1}>
+        <Text color={color}>
+          {`${item.ok ? '✓' : '✗'} ${view.title ?? item.title} `}
+          <Text dimColor>{`· ${formatElapsed(item.elapsedMs)}`}</Text>
+        </Text>
+        {shown.map((line, i) => (
+          <Text key={i}>{line === '' ? ' ' : line}</Text>
+        ))}
+        {more > 0 && <Text dimColor>{`…（还有 ${more} 行，Ctrl+O 切换完整显示）`}</Text>}
+      </Box>
+    )
+  }
+
+  if (view !== undefined && view.card === 'terminal') {
+    const status = item.exitCode !== undefined
+      ? (item.exitCode === 0 ? 'exit 0' : `exit ${item.exitCode}`)
+      : item.signal !== undefined ? item.signal : ''
+    const output = view.output ?? item.result
+    const lines = output.split('\n')
+    const cap = item.verbose ? 400 : 12
+    const shown = lines.slice(0, cap)
+    const more = lines.length - shown.length
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
+        <Text color={color}>
+          {`${item.ok && item.exitCode !== 1 ? '✓' : '✗'} ${view.title ?? item.title} `}
+          <Text dimColor>
+            {`· ${formatElapsed(item.elapsedMs)}${status !== '' ? ` · ${status}` : ''}`}
+          </Text>
+        </Text>
+        {shown.map((line, i) => (
+          <Text key={i} dimColor>{truncateLine(line, width - 4)}</Text>
+        ))}
+        {more > 0 && <Text dimColor>{`…（还有 ${more} 行，Ctrl+O 切换完整显示）`}</Text>}
+      </Box>
+    )
+  }
+
+  if (view !== undefined && view.card === 'search') {
+    const summary = view.shape === 'matches'
+      ? `${view.files.length} 个文件 · ${view.total} 处匹配${view.truncated ? '（已截断）' : ''}`
+      : `${view.paths.length} 个路径${view.truncated ? ` / 共 ${view.total}（已截断）` : ''}`
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
+        <Text color={color}>
+          {`${item.ok ? '✓' : '✗'} ${view.title ?? item.title} `}
+          <Text dimColor>{`· ${summary} · ${formatElapsed(item.elapsedMs)}`}</Text>
+        </Text>
+        {(view.shape === 'paths' ? view.paths.slice(0, item.verbose ? 200 : 8) : []).map((path, i) => (
+          <Text key={i} dimColor>{`  ${path}`}</Text>
+        ))}
+        {view.shape === 'paths' && view.paths.length > (item.verbose ? 200 : 8) && (
+          <Text dimColor>{`…（还有 ${view.paths.length - (item.verbose ? 200 : 8)} 个）`}</Text>
+        )}
+      </Box>
+    )
+  }
+
+  if (view !== undefined && view.card === 'read') {
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
+        <Text color={color}>
+          {`${item.ok ? '✓' : '✗'} ${view.title ?? `读 ${view.path}`} `}
+          <Text dimColor>
+            {`· 行 ${view.offset}–${view.offset + view.lines.length - 1} / ${view.totalLines} · ${formatElapsed(item.elapsedMs)}`}
+          </Text>
+        </Text>
+      </Box>
+    )
+  }
+
+  if (view !== undefined && view.card === 'web') {
+    const summary = view.kind === 'search'
+      ? `${view.sources.length} 个来源${view.truncated ? '（已截断）' : ''}`
+      : `HTTP ${view.statusCode}${view.truncated ? '（内容已截断）' : ''}`
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
+        <Text color={color}>
+          {`${item.ok ? '✓' : '✗'} ${view.title ?? 'web'} `}
+          <Text dimColor>{`· ${summary} · ${formatElapsed(item.elapsedMs)}`}</Text>
+        </Text>
+        {view.kind === 'search' && view.sources.slice(0, 5).map((source, i) => (
+          <Text key={i} dimColor>{`  ${truncateLine(source.title ?? source.url, width - 6)}`}</Text>
+        ))}
+      </Box>
+    )
+  }
+
+  // Generic / fallback card: title + args preview + result text.
   const resultLines = item.result.split('\n')
-  const shown = resultLines.slice(0, 12)
+  const cap = item.verbose ? 400 : 12
+  const shown = resultLines.slice(0, cap)
   const more = resultLines.length - shown.length
+  const args = formatToolArgs(item.args, Math.max(16, width - 10))
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
       <Text color={color}>
-        {`${item.ok ? '✓' : '✗'} ${item.name} `}
-        <Text dimColor>{formatArgs(item.args, width)}</Text>
+        {`${item.ok ? '✓' : '✗'} ${item.title} `}
+        {args !== '' && <Text dimColor>{args}</Text>}
+        <Text dimColor>{` · ${formatElapsed(item.elapsedMs)}`}</Text>
       </Text>
       {shown.map((line, i) => (
         <Text key={i} dimColor>{truncateLine(line, width - 4)}</Text>
       ))}
-      {more > 0 && <Text dimColor>{`…（还有 ${more} 行）`}</Text>}
+      {more > 0 && <Text dimColor>{`…（还有 ${more} 行，Ctrl+O 切换完整显示）`}</Text>}
+    </Box>
+  )
+}
+
+function ApprovalView(props: { store: TuiStore; prompt: ApprovalPrompt }): ReactElement {
+  const { store, prompt } = props
+  useInput((input, key) => {
+    if (input === 'y' || input === 'Y') store.answerApproval('once')
+    else if (input === 's' || input === 'S') store.answerApproval('session')
+    else if (input === 'a' || input === 'A') store.answerApproval('always')
+    else if (input === 'n' || input === 'N' || key.escape) store.answerApproval('reject')
+  })
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}>
+      <Text color="magenta" bold>{`需要批准：${prompt.toolName}`}</Text>
+      {prompt.command !== undefined && prompt.command !== '' && (
+        <Text color="magenta">{`  ${prompt.command}`}</Text>
+      )}
+      {prompt.reason !== '' && <Text dimColor>{prompt.reason}</Text>}
+      <Text>
+        <Text color="green">[y] 允许一次</Text>
+        {'  '}
+        <Text color="yellow">[s] 本会话不再问</Text>
+        {'  '}
+        <Text color="cyan">[a] 总是允许（记住）</Text>
+        {'  '}
+        <Text color="red">[n] 拒绝</Text>
+      </Text>
+    </Box>
+  )
+}
+
+function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width: number }): ReactElement {
+  const { store, question } = props
+  const item = question.item
+  useInput((input, key) => {
+    if (key.return) {
+      store.confirmQuestion()
+      return
+    }
+    if (key.escape) {
+      store.skipQuestion()
+      return
+    }
+    if (/^[1-9]$/.test(input)) {
+      const index = Number(input) - 1
+      const options = item.options ?? []
+      const option = options[index]
+      if (option !== undefined) store.toggleQuestionOption(option.label)
+    }
+  })
+  const options = item.options ?? []
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="blue" paddingX={1}>
+      <Text color="blue" bold>
+        {`问 题${question.total > 1 ? `（${question.index}/${question.total}）` : ''}：${item.question}`}
+      </Text>
+      {item.header !== undefined && item.header !== '' && <Text dimColor>{item.header}</Text>}
+      {item.detail !== undefined && item.detail !== '' && (
+        <Text dimColor>{truncateLine(item.detail, props.width - 4)}</Text>
+      )}
+      {options.map((option, index) => {
+        const selected = question.selected.includes(option.label)
+        return (
+          <Text key={option.label} color={selected ? 'blue' : undefined} bold={selected}>
+            {`[${index + 1}]${selected ? ' ● ' : ' ○ '}${option.label}` +
+              (option.description !== undefined ? ` — ${option.description}` : '')}
+          </Text>
+        )
+      })}
+      <Text dimColor>
+        {item.multiSelect === true
+          ? '数字键多选 · Enter 确认 · Esc 跳过'
+          : '数字键选择 · Enter 确认 · Esc 跳过'}
+      </Text>
+    </Box>
+  )
+}
+
+function FreeTextQuestionView(props: { question: ActiveQuestion }): ReactElement {
+  const item = props.question.item
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="blue" paddingX={1}>
+      <Text color="blue" bold>{`问 题：${item.question}`}</Text>
+      {item.detail !== undefined && item.detail !== '' && <Text dimColor>{item.detail}</Text>}
+      <Text dimColor>在下方输入框中输入回答，Enter 提交</Text>
     </Box>
   )
 }
@@ -128,42 +339,10 @@ function StreamView(props: { text: string; width: number }): ReactElement {
   )
 }
 
-function ApprovalView(props: { store: TuiStore; prompt: ApprovalPrompt }): ReactElement {
-  const { store, prompt } = props
-  useInput((input, key) => {
-    if (input === 'y' || input === 'Y') store.answerApproval('allowed-once')
-    else if (input === 'n' || input === 'N' || key.escape) store.answerApproval('rejected')
-  })
-  return (
-    <Box flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}>
-      <Text color="magenta" bold>{`需要批准：${prompt.toolName}`}</Text>
-      {prompt.reason !== '' && <Text dimColor>{prompt.reason}</Text>}
-      <Text>
-        <Text color="green">[y] 允许一次</Text>
-        {'  '}
-        <Text color="red">[n] 拒绝</Text>
-      </Text>
-    </Box>
-  )
-}
-
-function formatArgs(args: string, width: number): string {
-  if (args === '') return ''
-  let preview = args
-  try {
-    const parsed: unknown = JSON.parse(args)
-    if (typeof parsed === 'object' && parsed !== null) {
-      const entries = Object.entries(parsed as Record<string, unknown>)
-      preview = entries
-        .slice(0, 4)
-        .map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`)
-        .join(' ')
-      if (entries.length > 4) preview += ` …（${entries.length - 4} 个参数已省略）`
-    }
-  } catch {
-    // raw JSON string as produced by the model — keep as-is
-  }
-  return truncateLine(preview, Math.max(16, width - 10))
+function formatElapsed(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60_000)}m${Math.floor((ms % 60_000) / 1000)}s`
 }
 
 function truncateLine(line: string, width: number): string {
@@ -171,7 +350,7 @@ function truncateLine(line: string, width: number): string {
   let out = ''
   let w = 0
   for (const ch of Array.from(line)) {
-    const cw = ch.codePointAt(0) === undefined ? 1 : charWidth(ch)
+    const cw = charWidth(ch)
     if (w + cw > width) return `${out}…`
     out += ch
     w += cw
@@ -181,7 +360,6 @@ function truncateLine(line: string, width: number): string {
 
 function charWidth(ch: string): number {
   const code = ch.codePointAt(0) ?? 0
-  // CJK and fullwidth ranges: East Asian Wide/Fullwidth
   if (
     (code >= 0x1100 && code <= 0x115f) ||
     (code >= 0x2e80 && code <= 0xa4cf) ||
