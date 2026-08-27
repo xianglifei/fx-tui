@@ -258,10 +258,15 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     try {
       switch (name) {
         case 'help':
-          store.addNotice(
-            'Enter 发送 · Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全 · Esc 中断/清空 · Ctrl+O 工具详情 · ' +
-            '/edit 外部编辑器 · /image <路径> 附加图片 · 双击 Ctrl+C 退出',
-          )
+          store.addPanel('fx-tui 按键与命令', [
+            'Enter 发送消息 · Ctrl+J 或 Opt+Enter 换行 · ↑↓ 输入历史/菜单导航',
+            'Tab 补全菜单高亮项（/ 命令、@ 文件路径） · Esc 中断轮次/清空/关闭菜单/跳过',
+            'Ctrl+O 工具详情 摘要⇄完整 · Ctrl+C 清空输入（空输入双击退出）',
+            '',
+            '内置命令：/help 帮助 · /edit 用 $EDITOR 写长消息 · /image <路径> 附加图片 · /exit 退出',
+            'dsh 命令（来自注册表）：/compact 压缩历史 · /goal 长任务目标 ·',
+            '  /permission 切换权限模式 · /feedback 反馈（输入 / 查看全部）',
+          ])
           return
         case 'exit': case 'quit': case 'bye':
           await shutdown()
@@ -282,9 +287,9 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
             if (execution === undefined) {
               store.addNotice(`/${name}：命令未执行（语法或名称未解析）`, 'warn')
             } else if (execution.result.kind === 'error') {
-              store.addNotice(`/${name}：${execution.result.text}`, 'error')
+              store.addPanel(`/${name} 执行失败`, [execution.result.text])
             } else if (execution.result.text !== undefined && execution.result.text !== '') {
-              store.addNotice(`/${name}：${execution.result.text}`)
+              store.addPanel(`/${name}`, [execution.result.text])
             } else {
               store.addNotice(`/${name} 完成`)
             }

@@ -125,6 +125,15 @@ function FinalItemView(props: { item: FinalItem; width: number }): ReactElement 
           {`${item.tone === 'error' ? '✗ ' : item.tone === 'warn' ? '⚠ ' : '· '}${item.text}`}
         </Text>
       )
+    case 'panel':
+      return (
+        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+          <Text color="cyan" bold>{item.title}</Text>
+          {item.lines.map((line, i) => (
+            <Text key={i}>{line === '' ? ' ' : line}</Text>
+          ))}
+        </Box>
+      )
   }
 }
 
@@ -257,6 +266,7 @@ function ToolCardView(props: { item: ToolItem; width: number }): ReactElement {
 function ApprovalView(props: { store: TuiStore; prompt: ApprovalPrompt }): ReactElement {
   const { store, prompt } = props
   useInput((input, key) => {
+    if (key.eventType === 'release') return
     if (input === 'y' || input === 'Y') store.answerApproval('once')
     else if (input === 's' || input === 'S') store.answerApproval('session')
     else if (input === 'a' || input === 'A') store.answerApproval('always')
@@ -286,6 +296,7 @@ function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width:
   const { store, question } = props
   const item = question.item
   useInput((input, key) => {
+    if (key.eventType === 'release') return
     if (key.return) {
       store.confirmQuestion()
       return

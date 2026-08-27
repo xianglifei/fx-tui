@@ -120,6 +120,9 @@ export function InputBox(props: InputBoxProps): ReactElement {
 
   useInput((input, key) => {
     if (frozen) return
+    // Kitty-protocol terminals report key release as a separate event; without
+    // this guard every keypress would fire the handler twice.
+    if (key.eventType === 'release') return
 
     if (key.ctrl && input === 'c') {
       if (!isEmpty) {

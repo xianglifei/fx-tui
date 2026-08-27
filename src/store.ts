@@ -38,7 +38,8 @@ export interface ToolItem {
 }
 
 export interface NoticeItem { readonly kind: 'notice'; readonly text: string; readonly tone: 'info' | 'error' | 'warn' }
-export type FinalItem = UserItem | AssistantItem | ToolItem | NoticeItem
+export interface PanelItem { readonly kind: 'panel'; readonly title: string; readonly lines: readonly string[] }
+export type FinalItem = UserItem | AssistantItem | ToolItem | NoticeItem | PanelItem
 
 export interface PendingTool {
   readonly callId: string
@@ -387,6 +388,12 @@ export class TuiStore {
 
   addNotice(text: string, tone: NoticeItem['tone'] = 'info'): void {
     this.items.push({ kind: 'notice', text, tone })
+    this.commit()
+  }
+
+  /** Prominent bordered feedback (command output, help), unlike subtle notices. */
+  addPanel(title: string, lines: readonly string[]): void {
+    this.items.push({ kind: 'panel', title, lines })
     this.commit()
   }
 
