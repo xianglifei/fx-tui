@@ -3,6 +3,15 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.1] - 2026-08-27
+
+### 修复
+
+- 补全菜单（/ 命令、@ 文件）改为**固定高度**：菜单打开期间始终占满 8 个条目槽位
+  （过滤时用空行填充）。此前输入过滤会让菜单变矮、动态区帧收缩，输入框因此上浮。
+  现在打字全程帧高不变，输入框钉底稳定（帧分析实证：过滤各步 cursorUp 恒定）。
+  菜单内回车执行时，关闭与命令结果在同一个渲染提交中原子应用，无中间跳变。
+
 ## [0.5.0] - 2026-08-27
 
 ### 终端工程打磨（M5）
@@ -82,6 +91,7 @@
   双击 Ctrl+C 退出、`/help` `/exit` 内置命令
 - 端到端验证于 dsh 0.1.1-rc.2：真实模型回路、工具执行、中断、恢复
 
+[0.5.1]: https://github.com/xianglifei/fx-tui/releases/tag/v0.5.1
 [0.5.0]: https://github.com/xianglifei/fx-tui/releases/tag/v0.5.0
 [0.4.0]: https://github.com/xianglifei/fx-tui/releases/tag/v0.4.0
 [0.3.0]: https://github.com/xianglifei/fx-tui/releases/tag/v0.3.0

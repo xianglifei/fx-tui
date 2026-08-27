@@ -55,6 +55,8 @@ const HELP_TEXT =
   'Ctrl+C 清空，空输入时双击退出 · /help 帮助 · /edit 外部编辑器 · /image <路径> 附加图片'
 
 const MENU_SIZE = 8
+/** Visible entry rows the menu always occupies (blank-filled while filtering). */
+const MENU_SLOTS = 8
 
 export function InputBox(props: InputBoxProps): ReactElement {
   const { store, history, frozen, questionFreeText, seed, pendingImageCount, listCommands, runCommand, onSubmit, onInterrupt, onExit } = props
@@ -432,12 +434,19 @@ export function InputBox(props: InputBoxProps): ReactElement {
   return (
     <Box flexDirection="column">
       {menu !== null && menu.entries.length > 0 && (
-        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
-          {menu.entries.map((entry, index) => (
-            <Text key={entry.label} inverse={index === menu.index}>
-              {`${entry.label}${entry.description !== '' ? `  ${entry.description}` : ''}`}
-            </Text>
-          ))}
+        // Fixed height: filtering swaps entries for blank slots instead of
+        // resizing, so the frame height never changes while typing and the
+        // input box stays pinned to the bottom row.
+        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} height={MENU_SLOTS + 1}>
+          {Array.from({ length: MENU_SLOTS }, (_, index) => {
+            const entry = menu.entries[index]
+            if (entry === undefined) return <Text key={`blank-${index}`}>{' '}</Text>
+            return (
+              <Text key={entry.label} inverse={index === menu.index}>
+                {`${entry.label}${entry.description !== '' ? `  ${entry.description}` : ''}`}
+              </Text>
+            )
+          })}
           <Text dimColor>↑↓ 选择 · Tab 补全 · Enter {menu.kind === 'commands' ? '执行' : '补全'} · Esc 关闭</Text>
         </Box>
       )}
