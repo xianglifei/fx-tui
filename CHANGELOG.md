@@ -26,6 +26,9 @@
 - 其余安装形态一律拒自动升级并给出对应手动指引：node_modules 目录提示走包管理器
   （npm 分发启用后为 `npm i -g fx-tui`），缺 `.git` 目录指向 docs/install.md；
   `/help`、命令菜单、README 同步收录 `/update`；版本号升至 0.10.0
+- **新增 `AGENTS.md` 长期协作约定**：为任意编码 agent 固化仓库工作流规则——每次
+  提交/推送必同步 CHANGELOG、提交前 typecheck+build 必须通过、FX_TUI_VERSION 版本纪律、
+  禁止裸 add 带入工作区杂物；文件随 git 分发，保证跨会话、跨设备、跨工具持久生效
 
 ## [0.9.0] - 2026-08-27
 
