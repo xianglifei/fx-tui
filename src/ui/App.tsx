@@ -19,6 +19,7 @@ import { formatToolArgs } from '../store.js'
 import type { MenuEntry } from './Input.js'
 import { renderFileDiffs } from '../diff.js'
 import { renderMarkdownLines } from '../markdown.js'
+import { BANNER_BOX_HEIGHT, WelcomeBanner } from './Banner.js'
 import { InputBox } from './Input.js'
 import { StatusBar } from './StatusBar.js'
 
@@ -38,17 +39,45 @@ export interface AppProps {
   seed?: string
 }
 
+/** Rows the dynamic region occupies on a fresh session's first frame: status line + empty input box. */
+const DYNAMIC_RESERVE = 4
+
 export function App(props: AppProps): ReactElement {
   const snap = useSyncExternalStore(props.store.subscribe, props.store.getSnapshot)
   const { stdout } = useStdout()
   const columns = stdout?.columns
+  const rows = stdout?.rows
   const width = Math.max(24, (columns !== undefined && columns > 0 ? columns : 80) - 2)
+  // The banner spans the terminal's full width — the same width the input box
+  // stretches to in the dynamic region — so the top and bottom borders align.
+  const bannerWidth = Math.max(24, columns !== undefined && columns > 0 ? columns : 80)
   const frozen = snap.approval !== null || (snap.question !== null && !snap.questionFreeText)
+
+  // Splash filler: on a fresh session the banner is the only transcript item,
+  // so pad it until the first frame spans the viewport — the banner then sits
+  // at the terminal's top edge with the input pinned to the bottom. The
+  // filler is committed once with the banner's Static output; a resumed
+  // session skips it because history fills the viewport instead.
+  // The extra -1 reserves the trailing newline Ink appends to non-fullscreen
+  // frames (it measures only the dynamic region, which is far shorter than
+  // the viewport); without it that newline scrolls the frame one row and
+  // pushes the banner's top border off-screen.
+  const splashGap = snap.items.length === 1 && snap.items[0]?.kind === 'banner' &&
+    rows !== undefined && rows > 0 && rows < 1000
+    ? Math.max(0, rows - BANNER_BOX_HEIGHT - DYNAMIC_RESERVE - 1)
+    : 0
 
   return (
     <Box flexDirection="column">
       <Static items={snap.items as FinalItem[]}>
-        {(item, index) => <FinalItemView key={index} item={item} width={width} />}
+        {(item, index) => (
+          <FinalItemView
+            key={index}
+            item={item}
+            width={item.kind === 'banner' ? bannerWidth : width}
+            gap={item.kind === 'banner' ? splashGap : 0}
+          />
+        )}
       </Static>
       <Box flexDirection="column">
         {snap.pendingTools.map((tool: PendingTool) => (
@@ -105,9 +134,11 @@ export function App(props: AppProps): ReactElement {
   )
 }
 
-function FinalItemView(props: { item: FinalItem; width: number }): ReactElement {
+function FinalItemView(props: { item: FinalItem; width: number; gap?: number }): ReactElement {
   const { item, width } = props
   switch (item.kind) {
+    case 'banner':
+      return <WelcomeBanner item={item} width={width} gap={props.gap} />
     case 'user':
       return (
         <Box flexDirection="column">

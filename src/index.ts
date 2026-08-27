@@ -15,6 +15,7 @@
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, extname, isAbsolute, resolve } from 'node:path'
 import { createElement } from 'react'
@@ -51,7 +52,7 @@ import { App } from './ui/App.js'
 import type { MenuEntry } from './ui/Input.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.5.1'
+export const FX_TUI_VERSION = '0.6.0'
 
 /** Stable Cordis plugin name. */
 export const name = 'fx-tui-runner'
@@ -117,6 +118,17 @@ function readCliOptions(ctx: Context, exit: (code: number) => void | Promise<voi
   return options
 }
 
+/** dsh core version from the installed harness (display-only; blank when unreadable). */
+function readDshVersion(): string {
+  try {
+    const require = createRequire(import.meta.url)
+    const pkg = require('@deepseek-ai/dsh-agent/package.json') as { version?: unknown }
+    return typeof pkg.version === 'string' ? pkg.version : ''
+  } catch {
+    return ''
+  }
+}
+
 /** Mount the interactive terminal surface. */
 export function apply(ctx: Context): void {
   const exit = ctx.get('appExit')
@@ -175,10 +187,14 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
   const presenter = createPresenter(ctx)
   const store = new TuiStore(agent.id, modelLabel(), presenter)
   const memory = new ApprovalMemory(process.env.DSH_HOME)
-  store.addNotice(
-    `fx-tui v${FX_TUI_VERSION} · ${modelLabel()} · 会话 ${agent.id}` +
-    (options.resume !== undefined ? ' · 已恢复历史会话' : ''),
-  )
+  store.addBanner({
+    fxVersion: FX_TUI_VERSION,
+    dshVersion: readDshVersion(),
+    model: modelLabel(),
+    sessionId: agent.id,
+    cwd: process.cwd(),
+    resumed: options.resume !== undefined,
+  })
   store.replay(agent.session.events)
   store.finishReplay()
 

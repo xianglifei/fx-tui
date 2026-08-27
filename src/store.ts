@@ -39,7 +39,18 @@ export interface ToolItem {
 
 export interface NoticeItem { readonly kind: 'notice'; readonly text: string; readonly tone: 'info' | 'error' | 'warn' }
 export interface PanelItem { readonly kind: 'panel'; readonly title: string; readonly lines: readonly string[] }
-export type FinalItem = UserItem | AssistantItem | ToolItem | NoticeItem | PanelItem
+
+/** Splash box shown once at the top of a fresh transcript (startup facts). */
+export interface BannerItem {
+  readonly kind: 'banner'
+  readonly fxVersion: string
+  readonly dshVersion: string
+  readonly model: string
+  readonly sessionId: string
+  readonly cwd: string
+  readonly resumed: boolean
+}
+export type FinalItem = UserItem | AssistantItem | ToolItem | NoticeItem | PanelItem | BannerItem
 
 export interface PendingTool {
   readonly callId: string
@@ -496,6 +507,12 @@ export class TuiStore {
   /** Prominent bordered feedback (command output, help), unlike subtle notices. */
   addPanel(title: string, lines: readonly string[]): void {
     this.items.push({ kind: 'panel', title, lines })
+    this.commit()
+  }
+
+  /** Welcome banner as the transcript's first item; push before any replay. */
+  addBanner(banner: Omit<BannerItem, 'kind'>): void {
+    this.items.push({ kind: 'banner', ...banner })
     this.commit()
   }
 
