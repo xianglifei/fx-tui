@@ -3,6 +3,22 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.8.0] - 2026-08-27
+
+### 设置持久化与 /config 命令
+
+- **启动默认权限模式改为「自动允许」**：新增设置文件 `$DSH_HOME/fx-tui-settings.json`
+  （`{ version: 1, approvalMode }`），缺文件或损坏时按内置默认 `auto` 起步——删除该
+  文件即重置回默认
+- **`/config` 内置命令**（别名 `/setting`、`/settings`）：无参数弹出交互选择器
+  （标题带当前值，仿 /model）；支持 `/config permission <auto|ask>` 直改（亦接受
+  中文词「自动允许 / 每次询问」）。修改同时持久化启动默认并立即对当前会话生效；
+  非法用法回显用法提示。`/status` 的权限行拆为「当前会话 · 启动默认」两段，
+  `/help` 收录该命令
+- Shift+Tab 语义明确化：仍为会话级切换、从不写设置文件——避免临时的一次性切换被
+  永久记住；`TuiStore` 新增 `initialApprovalMode` 构造参数与 `setApprovalMode()`
+  方法，`cycleApprovalMode()` 复用之
+
 ## [0.7.0] - 2026-08-27
 
 ### 权限模式（Claude Code 式）

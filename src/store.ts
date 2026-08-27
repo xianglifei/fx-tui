@@ -175,9 +175,11 @@ export class TuiStore {
     sessionId: string,
     model: string,
     private readonly presenter?: ToolPresenter,
+    initialApprovalMode: ApprovalMode = 'ask',
   ) {
     this.sessionId = sessionId
     this.model = model
+    this.approvalMode = initialApprovalMode
     this.rebuild()
   }
 
@@ -561,14 +563,24 @@ export class TuiStore {
     return this.verboseToolDetail
   }
 
+  /** Set the approval stance directly（/config 路径）；an optional notice replaces
+   * the default announcement. */
+  setApprovalMode(mode: ApprovalMode, notice?: string): void {
+    const changed = this.approvalMode !== mode
+    this.approvalMode = mode
+    if (notice !== undefined) this.addNotice(notice)
+    else if (changed) this.commit()
+  }
+
   /** Cycle the approval stance（每次询问 ⇄ 自动允许）and announce the switch;
-   * returns the new mode. */
+   * returns the new mode. Session-scoped: Shift+Tab never rewrites the saved
+   * startup default — persisting that is `/config`'s job. */
   cycleApprovalMode(): ApprovalMode {
-    this.approvalMode = this.approvalMode === 'ask' ? 'auto' : 'ask'
-    this.addNotice(this.approvalMode === 'auto'
+    const next = this.approvalMode === 'ask' ? 'auto' : 'ask'
+    this.setApprovalMode(next, next === 'auto'
       ? '自动允许模式已开启：工具调用不再逐个询问（shift+tab 切回）'
       : '已切回每次询问模式：工具调用将逐个请求批准')
-    return this.approvalMode
+    return next
   }
 
   /** Context pressure from the token meter; window comes from request/context events. */

@@ -45,14 +45,15 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-user-questions'
 
 import { ApprovalMemory } from './approval-memory.js'
+import { FxSettings } from './settings.js'
 import { TuiStore } from './store.js'
-import type { ToolPresenter } from './store.js'
+import type { ApprovalMode, ToolPresenter } from './store.js'
 import { blocksToTextOf, formatToolArgs, toolResultCallIdOf, toolResultTextOf } from './store.js'
 import { App } from './ui/App.js'
 import type { MenuEntry } from './ui/Input.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.7.0'
+export const FX_TUI_VERSION = '0.8.0'
 
 /** Stable Cordis plugin name. */
 export const name = 'fx-tui-runner'
@@ -185,7 +186,10 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
   const modelLabel = (): string =>
     `${agent.options.provider ?? selectionRef.current?.provider ?? ''}/${agent.options.model ?? selectionRef.current?.model ?? ''}`
   const presenter = createPresenter(ctx)
-  const store = new TuiStore(agent.id, modelLabel(), presenter)
+  // Startup default approval stance comes from the persisted settings file
+  // (default 'auto'); Shift+Tab then changes the session without touching it.
+  const settings = new FxSettings(process.env.DSH_HOME)
+  const store = new TuiStore(agent.id, modelLabel(), presenter, settings.approvalMode)
   const memory = new ApprovalMemory(process.env.DSH_HOME)
   store.addBanner({
     fxVersion: FX_TUI_VERSION,
@@ -274,6 +278,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     { name: 'status', description: '查看运行状态与插件树', kind: 'builtin' },
     { name: 'sessions', description: '切换到另一个会话', kind: 'builtin' },
     { name: 'model', description: '切换模型 / provider', kind: 'builtin' },
+    { name: 'config', description: '查看 / 修改设置（启动默认权限模式）', kind: 'builtin' },
     { name: 'export', description: '导出当前会话为 Markdown', kind: 'builtin' },
     { name: 'edit', description: '用 $EDITOR 编写长消息', kind: 'builtin' },
     { name: 'image', description: '附加图片：<路径>，随下一条消息发送', kind: 'builtin' },
@@ -383,6 +388,56 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     } catch { /* persisting the default is best-effort */ }
   }
 
+  /** Persisted-settings labels; keeps notices and panels uniform. */
+  const modeLabel = (mode: ApprovalMode): string => mode === 'auto' ? '自动允许' : '每次询问'
+  const DIRECT_MODE_WORDS: Record<string, ApprovalMode> = {
+    auto: 'auto', ask: 'ask',
+    '自动允许': 'auto', 自动: 'auto',
+    '每次询问': 'ask', 询问: 'ask',
+  }
+
+  /** `/config`: interactive picker for the persisted startup defaults, or a
+   * direct one-shot form (`/config permission auto|ask`). Changing the default
+   * also flips the current session so both views stay consistent — unlike
+   * Shift+Tab, which never touches the file. */
+  async function runConfig(arg: string): Promise<void> {
+    const tokens = arg.split(/\s+/).filter(token => token !== '')
+    if (tokens.length > 0) {
+      const [key, value] = tokens
+      const target = key === 'permission' && value !== undefined ? DIRECT_MODE_WORDS[value.toLowerCase()] : undefined
+      if (target === undefined) {
+        store.addNotice('用法：/config（交互选择）或 /config permission <auto|ask>', 'warn')
+        return
+      }
+      applyApprovalMode(target)
+      return
+    }
+    const current = settings.approvalMode
+    const chosen = await pick(`设置启动默认权限模式（当前 ${modeLabel(current)}）`, [
+      { label: '自动允许', description: '工具调用不再逐个询问；之后每次启动默认开启' },
+      { label: '每次询问', description: '工具调用逐个请求批准；之后每次启动默认关闭' },
+    ])
+    const target = DIRECT_MODE_WORDS[chosen ?? '']
+    if (target === undefined) return
+    applyApprovalMode(target)
+  }
+
+  function applyApprovalMode(target: ApprovalMode): void {
+    const savedChanged = settings.approvalMode !== target
+    settings.setApprovalMode(target)
+    const sessionLabel = modeLabel(store.getSnapshot().approvalMode)
+    store.setApprovalMode(target)
+    if (!savedChanged && sessionLabel === modeLabel(target)) {
+      store.addNotice(`启动默认权限模式已是${modeLabel(target)}（${settings.location}）`)
+      return
+    }
+    store.addNotice(
+      `启动默认权限模式已保存为${modeLabel(target)}（${settings.location}）`
+      + (sessionLabel !== modeLabel(target) ? `，本次会话也已切换为${modeLabel(target)}` : ''),
+    )
+  }
+
+
   async function exportSession(): Promise<void> {
     const lines: string[] = [
       `# fx-tui 会话导出 · ${agent.id}`,
@@ -452,7 +507,8 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
             'Shift+Tab 切换权限模式（每次询问 ⇄ 自动允许） · Ctrl+O 工具详情 摘要⇄完整',
             'Ctrl+C 清空输入（空输入双击退出）',
             '',
-            '内置命令：/help 帮助 · /edit 用 $EDITOR 写长消息 · /image <路径> 附加图片 · /exit 退出',
+            '内置命令：/help 帮助 · /config 设置（含启动默认权限模式） · /edit 用 $EDITOR 写长消息 ·',
+            '  /image <路径> 附加图片 · /exit 退出',
             'dsh 命令（来自注册表）：/compact 压缩历史 · /goal 长任务目标 ·',
             '  /feedback 反馈（输入 / 查看全部）',
           ])
@@ -476,7 +532,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
           store.addPanel('运行状态', [
             `fx-tui v${FX_TUI_VERSION} · Node ${process.version} · ${process.platform}/${process.arch}`,
             `模型：${modelLabel()} · 会话：${agent.id}`,
-            `权限模式：${snapshot.approvalMode === 'auto' ? '自动允许（shift+tab 切换）' : '每次询问（shift+tab 切换）'}`,
+            `权限模式：当前会话 ${modeLabel(snapshot.approvalMode)}（shift+tab 切换）· 启动默认 ${modeLabel(settings.approvalMode)}（/config 修改）`,
             `上下文：${context} · 工作区：${process.cwd()}`,
             '',
             `已加载插件（${plugins.length}）：`,
@@ -489,6 +545,9 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
           return
         case 'model':
           await listModelChoices()
+          return
+        case 'config': case 'setting': case 'settings':
+          await runConfig(rest)
           return
         case 'export':
           await exportSession()

@@ -57,7 +57,11 @@
 - **agent 提问答 UI**：`ask_user_question` 渲染成选项卡（数字键选择）或自由文本问答
 - **Plan 审批卡片**：计划模式（`/plan`）下计划 markdown 结构化展示、批准选项 `✓` 标注、
   Enter 直接批准
-- **权限模式切换**：`/permission`（read-only / workspace-write / danger-full-access）
+- **权限模式**：启动默认为「自动允许」（工具调用不再逐个询问）；`/config`（交互
+  选择或 `/config permission <auto|ask>`）修改并持久化该默认到
+  `$DSH_HOME/fx-tui-settings.json`，删除文件即重置回默认；会话内 Shift+Tab 随时
+  切换 `每次询问 ⇄ 自动允许`（仅本会话生效，不写回设置文件），`/status`
+  同时展示启动默认与当前会话两个值
 
 ### 输入效率
 
