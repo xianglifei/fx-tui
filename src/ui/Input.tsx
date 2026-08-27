@@ -7,12 +7,17 @@
  * `usePaste` for pasted text (bracketed paste mode). Multi-character chunks
  * that still reach `useInput` are coalesced typing or piped automation; their
  * line endings are normalized and a trailing newline behaves like Enter.
+ *
+ * A third arrival shape is a terminal file-drop: dropping a file onto the
+ * window pastes its (quoted) path, which this editor offers to attach as an
+ * image while the buffer holds nothing else — see interceptDrop below.
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { Box, Text, useInput, usePaste, useStdout } from 'ink'
-import type { TuiStore } from '../store.js'
+import type { PendingImage, TuiStore } from '../store.js'
+import { isExistingImagePath, parsePathChunk } from '../path-drops.js'
 import { fuzzyMatchPaths, listWorkspaceFiles } from '../workspace-files.js'
 import { textRows } from './ink-text.js'
 
@@ -30,9 +35,11 @@ export interface InputBoxProps {
   questionFreeText: boolean
   /** Initial editor content (used when re-mounting after the external editor). */
   seed?: string
-  pendingImageCount: number
+  pendingImages: readonly PendingImage[]
   listCommands(): readonly MenuEntry[]
   runCommand(line: string): void
+  /** Attaches extracted drop paths to the next message (terminal file-drop). */
+  onDropFiles?: (paths: readonly string[]) => void
   onSubmit(text: string): void
   onInterrupt(): void
   onExit(): void
@@ -62,7 +69,7 @@ const MENU_SIZE = 8
 const MENU_SLOTS = 8
 
 export function InputBox(props: InputBoxProps): ReactElement {
-  const { store, history, frozen, questionFreeText, seed, pendingImageCount, listCommands, runCommand, onSubmit, onInterrupt, onExit, onHeightChange } = props
+  const { store, history, frozen, questionFreeText, seed, pendingImages, listCommands, runCommand, onSubmit, onDropFiles, onInterrupt, onExit, onHeightChange } = props
   const [ed, setEd] = useState<EditorState>(() => seedToState(seed))
   const [histIdx, setHistIdx] = useState(-1)
   const [draft, setDraft] = useState<string | null>(null)
@@ -86,7 +93,10 @@ export function InputBox(props: InputBoxProps): ReactElement {
     const inner = Math.max(8, termColumns - 4)
     const editorRows = ed.lines.reduce((n, line) => n + textRows(line === '' ? ' ' : line, inner), 0)
     const h = 2 + editorRows +
-      (pendingImageCount > 0 ? textRows(`📎 已附加 ${pendingImageCount} 张图片，将随下一条消息发送`, inner) : 0) +
+      (pendingImages.length > 0
+        ? textRows(`📎 已附加 ${pendingImages.length} 张图片，将随下一条消息发送`, inner) +
+          textRows(trayDetailText(pendingImages), inner)
+        : 0) +
       (questionFreeText && isEmpty && histIdx === -1 ? textRows('输入你的回答，Enter 提交（Esc 跳过）…', inner) : 0) +
       (menuOpen ? MENU_SLOTS + 3 : 0)
     if (h !== reportedHeightRef.current) {
@@ -227,6 +237,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
     // Coalesced typing or piped automation: insert as (multi-)line text and
     // submit when the chunk carries a trailing newline.
     if (input.length > 1) {
+      if (interceptDrop(input)) return
       insertChunk(input, true)
       return
     }
@@ -298,6 +309,19 @@ export function InputBox(props: InputBoxProps): ReactElement {
       return
     }
 
+    // Attachment tray edits: with an empty editor, Backspace retracts the
+    // newest pending image and Alt+Backspace empties the tray; once text is in
+    // the editor they keep their normal editing role.
+    if (key.backspace && isEmpty && pendingImages.length > 0) {
+      if (key.meta || key.ctrl) {
+        store.addNotice(`已清空 ${store.clearPendingImages()} 张待发送图片`)
+      } else {
+        const removed = store.removeLastPendingImage()
+        if (removed !== undefined) store.addNotice(`已移除待发送图片：${removed.label}`)
+      }
+      return
+    }
+
     if (key.backspace) {
       setEd(current => {
         const chars = Array.from(current.lines[current.row] ?? '')
@@ -352,6 +376,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
 
   usePaste((text) => {
     if (frozen) return
+    if (interceptDrop(text)) return
     insertChunk(text, false)
   })
 
@@ -386,6 +411,26 @@ export function InputBox(props: InputBoxProps): ReactElement {
       lines.splice(current.row, 1, before, after)
       return { lines, row: current.row + 1, col: 0 }
     })
+  }
+
+  /**
+   * Drop-to-attach gate: terminals implement dragging a file onto the window
+   * as a paste of its path (quoted or escaped when it contains spaces). While
+   * the editor holds nothing else, a chunk made purely of existing image paths
+   * becomes an immediate attachment instead of typed text; any other content,
+   * an in-progress draft, or a non-image keeps the original paste behavior.
+   */
+  function interceptDrop(chunk: string): boolean {
+    if (frozen || onDropFiles === undefined) return false
+    const buffer = ed.lines.join('\n').trim()
+    if (buffer !== '' && buffer.toLowerCase() !== '/image') return false
+    const parsed = parsePathChunk(chunk)
+    if (!parsed.allImages || parsed.paths.some(path => !isExistingImagePath(path))) return false
+    setEd({ lines: [''], row: 0, col: 0 })
+    setHistIdx(-1)
+    setDraft(null)
+    onDropFiles(parsed.paths)
+    return true
   }
 
   /** Insert a chunk as multi-line text at the cursor; optionally submit on trailing newline. */
@@ -488,8 +533,11 @@ export function InputBox(props: InputBoxProps): ReactElement {
         {isEmpty && histIdx === -1 && questionFreeText && (
           <Text dimColor>输入你的回答，Enter 提交（Esc 跳过）…</Text>
         )}
-        {pendingImageCount > 0 && (
-          <Text color="magenta">{`📎 已附加 ${pendingImageCount} 张图片，将随下一条消息发送`}</Text>
+        {pendingImages.length > 0 && (
+          <>
+            <Text color="magenta">{`📎 已附加 ${pendingImages.length} 张图片，将随下一条消息发送`}</Text>
+            <Text dimColor>{trayDetailText(pendingImages)}</Text>
+          </>
         )}
         {ed.lines.map((line, index) => (
           <Text key={index}>
@@ -508,6 +556,12 @@ function seedToState(seed: string | undefined): EditorState {
   const lines = seed.split('\n')
   const last = lines[lines.length - 1] ?? ''
   return { lines, row: lines.length - 1, col: Array.from(last).length }
+}
+
+/** Names of the queued images in the attachment tray; shared by the render and
+ * the height estimate so the filler budget matches exactly what will be drawn. */
+function trayDetailText(images: readonly PendingImage[]): string {
+  return images.map(image => image.label).join(' · ')
 }
 
 /** Pure splice of multi-line text into an editor state at its cursor. */

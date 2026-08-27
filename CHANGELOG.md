@@ -3,6 +3,30 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.9.0] - 2026-08-27
+
+### 图片拖拽直入与附件托盘
+
+- **拖图即附加**：从 Finder 把图片直接拖进终端窗口即自动附加到待发送队列，多选拖拽
+  也支持——不再需要手敲 `/image <路径>`。原理：终端把「文件拖入」实现为在光标处
+  粘贴该文件的路径文本（含空格时加引号或 `\ ` 转义），输入框据此拦截。仅当编辑器
+  为空（或恰好是裸 `/image`）且整段内容解析为真实存在的图片文件时才自动附加；
+  编辑器已有文字或非图片文件维持原有文本插入，绝不静默修改草稿。拦截覆盖两个输入
+  通道：bracketed paste 与多字符块（兼容未开启括号粘贴的终端）
+- **新模块 `src/path-drops.ts`**：shell 风格分词器（单/双引号、反斜杠转义、未闭合
+  引号容错）+ 路径规范化（`~` / `~` 展开、相对路径锚定 cwd、`file://` URI 百分号解码）
+  + 扩展名→media type 映射；纯函数实现，与 UI 解耦
+- **`/image` 增强**：参数走同一分词器，支持 `'a b.png'`、`a\ b.png`、`~/x.png`、
+  `file:///…` 等形态且**可一次附加多个**；某个文件读取失败只跳过该张、不中断批次
+- **附件托盘可视化**：附加后品红计数行下新增暗色明细行，逐张显示
+  `文件名（宽×高）`；高度估算与渲染共用同一文案生成函数，弹性填充区尺寸依旧精确
+- **附件撤销**：空输入框按 `⌫` 撤销最后一张（逐张回退、每步发通知）、`⌥⌫` 一键清空，
+  另有 `/image clear` 命令兜底。`TuiStore` 新增 `removeLastPendingImage()` 与
+  `clearPendingImages()`；编辑器有文字时 ⌫ 保持原编辑语义，不会误删
+- **`/image` 空参改为明细面板**：列出已附加图片并提示撤销手势（无附件时保持用法告警）；
+  托盘不放常驻按键提示——说明集中在明细面板与 `/help`
+- `/help`、命令菜单描述、README 同步更新；版本号升至 0.9.0
+
 ## [0.8.0] - 2026-08-27
 
 ### 设置持久化与 /config 命令
@@ -178,6 +202,7 @@
   双击 Ctrl+C 退出、`/help` `/exit` 内置命令
 - 端到端验证于 dsh 0.1.1-rc.2：真实模型回路、工具执行、中断、恢复
 
+[0.9.0]: https://github.com/xianglifei/fx-tui/releases/tag/v0.9.0
 [0.7.0]: https://github.com/xianglifei/fx-tui/releases/tag/v0.7.0
 [0.6.1]: https://github.com/xianglifei/fx-tui/releases/tag/v0.6.1
 [0.6.0]: https://github.com/xianglifei/fx-tui/releases/tag/v0.6.0

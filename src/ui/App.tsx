@@ -30,6 +30,8 @@ import { textRows } from './ink-text.js'
 export interface AppActions {
   onSubmit(text: string): void
   runCommand(line: string): void
+  /** Attaches image paths extracted from a terminal file-drop. */
+  onDroppedFiles(paths: readonly string[]): void
   onInterrupt(): void
   onExit(): void
 }
@@ -124,10 +126,11 @@ export function App(props: AppProps): ReactElement {
           frozen={frozen}
           questionFreeText={snap.question !== null && snap.questionFreeText}
           seed={props.seed}
-          pendingImageCount={snap.pendingImages.length}
+          pendingImages={snap.pendingImages}
           listCommands={props.listCommands}
           runCommand={props.actions.runCommand}
           onSubmit={props.actions.onSubmit}
+          onDropFiles={props.actions.onDroppedFiles}
           onInterrupt={props.actions.onInterrupt}
           onExit={props.actions.onExit}
           onHeightChange={setInputHeight}

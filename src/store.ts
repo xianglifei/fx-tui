@@ -511,6 +511,23 @@ export class TuiStore {
     return images
   }
 
+  /** Retract the most recently queued image (Backspace on an empty editor);
+   * undefined when the tray is already empty. */
+  removeLastPendingImage(): PendingImage | undefined {
+    const removed = this.pendingImages.pop()
+    if (removed !== undefined) this.commit()
+    return removed
+  }
+
+  /** Drop every queued image (`Alt+Backspace`, `/image clear`); returns how many went away. */
+  clearPendingImages(): number {
+    const count = this.pendingImages.length
+    if (count === 0) return 0
+    this.pendingImages = []
+    this.commit()
+    return count
+  }
+
   /** Drop already-rendered transcript items; the previous Ink mount's Static
    * output stays in the terminal scrollback, so a fresh mount must not re-render it.
    * The banner leads the fresh batch (its previous copy was flushed away). */

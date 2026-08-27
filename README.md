@@ -70,8 +70,11 @@
 - **@-文件引用**：输入 `@` 弹出工作区文件的 fuzzy 路径补全（零依赖自研评分器），
   选中后模型自动读取该文件
 - **$EDITOR 长消息**：`/edit` 挂起 TUI → 打开 `$EDITOR` → 编辑内容回填输入框
-- **图片输入**：`/image <路径>` 附加图片（png/jpeg/webp/gif，经 dsh attachment 服务
-  持久化），随下一条消息发送；配视觉路由（如 deepseek-v4-flash-vision-exp）可识图
+- **图片输入**：从 Finder **直接拖图进终端**即自动附加（多选也行），或 `/image <路径…>`
+  附加（png/jpeg/webp/gif，经 dsh attachment 服务持久化；路径支持引号/`\ ` 转义/
+  `~`/`file://`，可一次多个）；空输入框 `⌫` 撤销最后一张、`⌥⌫` 清空、
+  `/image` 空参查看明细、`/image clear` 一键清空；图片随下一条消息发送，
+  配视觉路由（如 deepseek-v4-flash-vision-exp）可识图
 - **排队输入（steering）**：agent 忙碌时提交显示 `⏳ 已排队`，轮次结束自动消费
 
 ### 会话与多任务
@@ -192,7 +195,7 @@ fx --resume <id>                    # 恢复会话
 | `Ctrl+C` | 清空输入；空输入时再按一次退出 |
 | `y` `s` `a` `n` | 审批：一次 / 本会话 / 总是（记住）/ 拒绝 |
 | 数字键 | 问题选项选择 |
-| `/help` `/status` `/sessions` `/model` `/export` `/edit` `/image <路径>` `/exit` | 内置命令（`/` 查看全部） |
+| `/help` `/status` `/sessions` `/model` `/export` `/edit` `/image <路径…>` `/exit` | 内置命令（`/` 查看全部） |
 
 ### 审批记忆
 

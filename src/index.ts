@@ -17,7 +17,7 @@ import { spawnSync } from 'node:child_process'
 import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, extname, isAbsolute, resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 import { createElement } from 'react'
 import { render } from 'ink'
 import type { Instance } from 'ink'
@@ -26,7 +26,6 @@ import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 // Declaration-merge carriers: importing these types registers the ctx keys and
@@ -45,6 +44,7 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-user-questions'
 
 import { ApprovalMemory } from './approval-memory.js'
+import { expandPath, imageMediaTypeOf, tokenizePathList } from './path-drops.js'
 import { FxSettings } from './settings.js'
 import { TuiStore } from './store.js'
 import type { ApprovalMode, ToolPresenter } from './store.js'
@@ -53,7 +53,7 @@ import { App } from './ui/App.js'
 import type { MenuEntry } from './ui/Input.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.8.0'
+export const FX_TUI_VERSION = '0.9.0'
 
 /** Stable Cordis plugin name. */
 export const name = 'fx-tui-runner'
@@ -72,14 +72,6 @@ const USAGE = `fx-tui v${FX_TUI_VERSION} — DeepSeek Harness 的交互式终端
 
 按键：Enter 发送 · Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全 · Shift+Tab 权限模式 · Esc 中断 · Ctrl+O 工具详情 · Ctrl+C 清空/双击退出
 `
-
-const IMAGE_MEDIA_TYPES: Record<string, ImageMediaType> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.gif': 'image/gif',
-}
 
 interface CliOptions {
   resume?: string
@@ -281,7 +273,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     { name: 'config', description: '查看 / 修改设置（启动默认权限模式）', kind: 'builtin' },
     { name: 'export', description: '导出当前会话为 Markdown', kind: 'builtin' },
     { name: 'edit', description: '用 $EDITOR 编写长消息', kind: 'builtin' },
-    { name: 'image', description: '附加图片：<路径>，随下一条消息发送', kind: 'builtin' },
+    { name: 'image', description: '附加图片：<路径>… 或直接拖入终端；空参查看明细', kind: 'builtin' },
     { name: 'exit', description: '退出 fx-tui', kind: 'builtin' },
   ]
 
@@ -508,7 +500,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
             'Ctrl+C 清空输入（空输入双击退出）',
             '',
             '内置命令：/help 帮助 · /config 设置（含启动默认权限模式） · /edit 用 $EDITOR 写长消息 ·',
-            '  /image <路径> 附加图片 · /exit 退出',
+            '  /image <路径…> 附加图片（可拖拽入窗）· 空参查看明细 · /image clear 清空 · /exit 退出',
             'dsh 命令（来自注册表）：/compact 压缩历史 · /goal 长任务目标 ·',
             '  /feedback 反馈（输入 / 查看全部）',
           ])
@@ -555,9 +547,29 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
         case 'edit':
           await openExternalEditor()
           return
-        case 'image':
-          await attachImage(rest)
+        case 'image': {
+          const tokens = tokenizePathList(rest)
+          if (tokens.length === 1 && tokens[0]!.toLowerCase() === 'clear') {
+            const cleared = store.clearPendingImages()
+            store.addNotice(cleared > 0 ? `已清空 ${cleared} 张待发送图片` : '当前没有待发送的图片')
+            return
+          }
+          if (tokens.length === 0) {
+            const snap = store.getSnapshot()
+            if (snap.pendingImages.length === 0) {
+              store.addNotice('用法：/image <图片路径>（支持 png / jpeg / webp / gif，可写多个路径）', 'warn')
+              return
+            }
+            store.addPanel('已附加的图片（随下一条消息发送）', [
+              ...snap.pendingImages.map(image => `· ${image.label}`),
+              '',
+              '⌫ 输入框为空时撤销最后一张 · ⌥⌫ 清空全部 · /image clear 同效',
+            ])
+            return
+          }
+          await attachImagePaths(tokens)
           return
+        }
         case 'forget': case 'forget-approvals':
           store.addNotice('总是授权记录在 $DSH_HOME/fx-tui-allowlist.json，删除该文件即可清除（本会话记忆随进程结束失效）', 'warn')
           return
@@ -585,36 +597,36 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     }
   }
 
-  async function attachImage(pathArg: string): Promise<void> {
-    if (pathArg === '') {
-      store.addNotice('用法：/image <图片路径>（支持 png / jpeg / webp / gif）', 'warn')
-      return
-    }
-    const expanded = pathArg.startsWith('~/') ? resolve(process.env.HOME ?? '~', pathArg.slice(2)) : pathArg
-    const absolute = isAbsolute(expanded) ? expanded : resolve(process.cwd(), expanded)
-    const mediaType = IMAGE_MEDIA_TYPES[extname(absolute).toLowerCase()]
-    if (mediaType === undefined) {
-      store.addNotice(`不支持的图片格式：${basename(absolute)}（支持 png / jpeg / webp / gif）`, 'error')
-      return
-    }
-    let data: Uint8Array
-    try {
-      data = new Uint8Array(readFileSync(absolute))
-    } catch (error) {
-      store.addNotice(`读取图片失败：${error instanceof Error ? error.message : String(error)}`, 'error')
-      return
-    }
-    const name = basename(absolute)
-    try {
-      const [ref] = await ctx.attachments.saveImages([{ data, mediaType, name }])
-      if (ref === undefined) {
-        store.addNotice('图片保存失败：未返回引用', 'error')
-        return
+  /** Attach each path to the next outgoing message; one bad path reports and
+   * moves on instead of aborting the rest. Shared by `/image` (whose arguments
+   * arrive pre-tokenized) and by terminal file-drops pasted into the input box. */
+  async function attachImagePaths(paths: readonly string[]): Promise<void> {
+    for (const pathArg of paths) {
+      const absolute = expandPath(pathArg)
+      const mediaType = imageMediaTypeOf(absolute)
+      if (mediaType === undefined) {
+        store.addNotice(`不支持的图片格式：${basename(absolute)}（支持 png / jpeg / webp / gif）`, 'error')
+        continue
       }
-      store.addPendingImage(ref, `${name}（${ref.width}×${ref.height}）`)
-      store.addNotice(`已附加图片 ${name}（${ref.width}×${ref.height}），将随下一条消息发送`)
-    } catch (error) {
-      store.addNotice(`图片校验失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+      let data: Uint8Array
+      try {
+        data = new Uint8Array(readFileSync(absolute))
+      } catch (error) {
+        store.addNotice(`读取图片失败：${absolute}（${error instanceof Error ? error.message : String(error)}）`, 'error')
+        continue
+      }
+      const name = basename(absolute)
+      try {
+        const [ref] = await ctx.attachments.saveImages([{ data, mediaType, name }])
+        if (ref === undefined) {
+          store.addNotice('图片保存失败：未返回引用', 'error')
+          continue
+        }
+        store.addPendingImage(ref, `${name}（${ref.width}×${ref.height}）`)
+        store.addNotice(`已附加图片 ${name}（${ref.width}×${ref.height}），将随下一条消息发送`)
+      } catch (error) {
+        store.addNotice(`图片校验失败：${name}（${error instanceof Error ? error.message : String(error)}）`, 'error')
+      }
     }
   }
 
@@ -719,6 +731,12 @@ function bottomFlush(): void {
     },
     runCommand(line: string): void {
       void runCommand(line)
+    },
+    /** Terminal drop: the input box extracted existing image paths from a
+     * pasted drop chunk; attach them like /image would. */
+    onDroppedFiles(paths: readonly string[]): void {
+      debugLog('dropped-files', paths)
+      void attachImagePaths(paths)
     },
     onInterrupt(): void {
       store.setInterrupting()
