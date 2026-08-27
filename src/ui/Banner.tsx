@@ -4,10 +4,10 @@
  * workspace) inside a rounded box, Claude-Code-style. Narrow terminals drop
  * the logo before the fact values are allowed to truncate.
  *
- * `gap` pads the box with blank rows so the first frame fills the viewport:
- * the banner then lands at the terminal's top edge while the input stays
- * pinned to the bottom row. It is committed once with the banner's Static
- * output and scrolls away naturally as the transcript grows.
+ * The banner is committed once as a Static item. While the conversation is
+ * shorter than the viewport, the elastic filler in App.tsx keeps the box
+ * pinned to the terminal's top edge; once the screen fills, it erodes into
+ * scrollback line by line like any other content.
  */
 
 import type { ReactElement } from 'react'
@@ -36,7 +36,7 @@ const HINT = '输入消息开始对话 · /help 查看按键与命令'
 /** Rendered rows of the banner box (2 borders + content rows); keep in sync with the layout. */
 export const BANNER_BOX_HEIGHT = LOGO.length + 2
 
-export function WelcomeBanner(props: { item: BannerItem; width: number; gap?: number }): ReactElement {
+export function WelcomeBanner(props: { item: BannerItem; width: number }): ReactElement {
   const item = props.item
   // Border (2) + paddingX (2) cannot carry content.
   const inner = Math.max(20, props.width - 4)
@@ -64,37 +64,32 @@ export function WelcomeBanner(props: { item: BannerItem; width: number; gap?: nu
   ]
 
   return (
-    <Box flexDirection="column">
-      <Box
-        flexDirection="column"
-        borderStyle="round"
-        borderColor="cyan"
-        paddingX={1}
-        width={props.width}
-      >
-        <Box flexDirection="row">
-          {showLogo && (
-            <Box flexDirection="column" marginRight={LOGO_GAP}>
-              {LOGO.map((line, index) => (
-                <Text key={index} color="cyan" bold>{line}</Text>
-              ))}
-            </Box>
-          )}
-          <Box flexDirection="column" justifyContent="center">
-            {facts.map(fact => (
-              <Box key={fact.label}>
-                <Box width={LABEL_WIDTH}><Text dimColor>{fact.label}</Text></Box>
-                <Text>{truncateLine(fact.value, valueBudget)}</Text>
-              </Box>
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor="cyan"
+      paddingX={1}
+      width={props.width}
+    >
+      <Box flexDirection="row">
+        {showLogo && (
+          <Box flexDirection="column" marginRight={LOGO_GAP}>
+            {LOGO.map((line, index) => (
+              <Text key={index} color="cyan" bold>{line}</Text>
             ))}
-            <Text>{' '}</Text>
-            <Text dimColor>{truncateLine(HINT, infoWidth - 1)}</Text>
           </Box>
+        )}
+        <Box flexDirection="column" justifyContent="center">
+          {facts.map(fact => (
+            <Box key={fact.label}>
+              <Box width={LABEL_WIDTH}><Text dimColor>{fact.label}</Text></Box>
+              <Text>{truncateLine(fact.value, valueBudget)}</Text>
+            </Box>
+          ))}
+          <Text>{' '}</Text>
+          <Text dimColor>{truncateLine(HINT, infoWidth - 1)}</Text>
         </Box>
       </Box>
-      {Array.from({ length: props.gap ?? 0 }, (_, index) => (
-        <Text key={`gap-${index}`}>{' '}</Text>
-      ))}
     </Box>
   )
 }

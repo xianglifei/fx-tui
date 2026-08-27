@@ -9,7 +9,7 @@
  * line endings are normalized and a trailing newline behaves like Enter.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { Box, Text, useInput, usePaste } from 'ink'
 import type { TuiStore } from '../store.js'
@@ -35,6 +35,8 @@ export interface InputBoxProps {
   onSubmit(text: string): void
   onInterrupt(): void
   onExit(): void
+  /** Reports the box's rendered row count (feeds the splash filler budget). */
+  onHeightChange?: (rows: number) => void
 }
 
 interface EditorState {
@@ -59,15 +61,31 @@ const MENU_SIZE = 8
 const MENU_SLOTS = 8
 
 export function InputBox(props: InputBoxProps): ReactElement {
-  const { store, history, frozen, questionFreeText, seed, pendingImageCount, listCommands, runCommand, onSubmit, onInterrupt, onExit } = props
+  const { store, history, frozen, questionFreeText, seed, pendingImageCount, listCommands, runCommand, onSubmit, onInterrupt, onExit, onHeightChange } = props
   const [ed, setEd] = useState<EditorState>(() => seedToState(seed))
   const [histIdx, setHistIdx] = useState(-1)
   const [draft, setDraft] = useState<string | null>(null)
   const [menu, setMenu] = useState<Menu | null>(null)
   const menuIndexRef = useRef(0)
   const dismissedQueryRef = useRef<string | null>(null)
+  const reportedHeightRef = useRef(-1)
 
   const isEmpty = ed.lines.length === 1 && ed.lines[0] === ''
+
+  // Report the rendered row count (borders + editor lines + hints + menu) so
+  // App's splash filler can absorb height changes without scrolling. Must be
+  // the exact rendered height: the first frame's scroll budget depends on it.
+  useLayoutEffect(() => {
+    const menuOpen = menu !== null && menu.entries.length > 0
+    const h = 2 + Math.max(1, ed.lines.length) +
+      (pendingImageCount > 0 ? 1 : 0) +
+      (questionFreeText && isEmpty && histIdx === -1 ? 1 : 0) +
+      (menuOpen ? MENU_SLOTS + 3 : 0)
+    if (h !== reportedHeightRef.current) {
+      reportedHeightRef.current = h
+      onHeightChange?.(h)
+    }
+  })
 
   // -- Completion menu derivation -------------------------------------------
 

@@ -5,6 +5,7 @@
  */
 
 import { useSyncExternalStore } from 'react'
+import { useState } from 'react'
 import type { ReactElement } from 'react'
 import { Box, Static, Text, useInput, useStdout } from 'ink'
 import type {
@@ -12,6 +13,7 @@ import type {
   ApprovalPrompt,
   FinalItem,
   PendingTool,
+  Snapshot,
   TuiStore,
   ToolItem,
 } from '../store.js'
@@ -39,9 +41,6 @@ export interface AppProps {
   seed?: string
 }
 
-/** Rows the dynamic region occupies on a fresh session's first frame: status line + empty input box. */
-const DYNAMIC_RESERVE = 4
-
 export function App(props: AppProps): ReactElement {
   const snap = useSyncExternalStore(props.store.subscribe, props.store.getSnapshot)
   const { stdout } = useStdout()
@@ -53,19 +52,20 @@ export function App(props: AppProps): ReactElement {
   const bannerWidth = Math.max(24, columns !== undefined && columns > 0 ? columns : 80)
   const frozen = snap.approval !== null || (snap.question !== null && !snap.questionFreeText)
 
-  // Splash filler: on a fresh session the banner is the only transcript item,
-  // so pad it until the first frame spans the viewport — the banner then sits
-  // at the terminal's top edge with the input pinned to the bottom. The
-  // filler is committed once with the banner's Static output; a resumed
-  // session skips it because history fills the viewport instead.
-  // The extra -1 reserves the trailing newline Ink appends to non-fullscreen
-  // frames (it measures only the dynamic region, which is far shorter than
-  // the viewport); without it that newline scrolls the frame one row and
-  // pushes the banner's top border off-screen.
-  const splashGap = snap.items.length === 1 && snap.items[0]?.kind === 'banner' &&
-    rows !== undefined && rows > 0 && rows < 1000
-    ? Math.max(0, rows - BANNER_BOX_HEIGHT - DYNAMIC_RESERVE - 1)
-    : 0
+  // Matches InputBox's reported height for an empty single-line editor, so
+  // the first paint already has the final filler and no second frame scrolls.
+  const [inputHeight, setInputHeight] = useState(3)
+
+  // Elastic splash filler: blank rows between the settled transcript and the
+  // live region keep the frame at viewport height while the conversation is
+  // shorter than the screen — the banner stays pinned to the top edge and the
+  // input to the bottom row, and every new line consumes filler instead of
+  // scrolling (Claude Code's startup screen). Once the filler is exhausted the
+  // app scrolls like a normal terminal transcript and the banner erodes into
+  // scrollback line by line. Sizing errs on the small side: a short filler
+  // only leaves a harmless gap above the status bar, while an oversized one
+  // would push the frame top into the static region and erase transcript rows.
+  const filler = computeFiller(snap as Snapshot, width, rows, inputHeight)
 
   return (
     <Box flexDirection="column">
@@ -75,11 +75,13 @@ export function App(props: AppProps): ReactElement {
             key={index}
             item={item}
             width={item.kind === 'banner' ? bannerWidth : width}
-            gap={item.kind === 'banner' ? splashGap : 0}
           />
         )}
       </Static>
       <Box flexDirection="column">
+        {filler > 0 && Array.from({ length: filler }, (_, index) => (
+          <Text key={`filler-${index}`}>{' '}</Text>
+        ))}
         {snap.pendingTools.map((tool: PendingTool) => (
           <PendingToolView key={tool.callId} tool={tool} width={width} />
         ))}
@@ -127,6 +129,7 @@ export function App(props: AppProps): ReactElement {
           onSubmit={props.actions.onSubmit}
           onInterrupt={props.actions.onInterrupt}
           onExit={props.actions.onExit}
+          onHeightChange={setInputHeight}
         />
         {snap.exitArmed && <Text color="red">再按一次 Ctrl+C 退出 fx-tui</Text>}
       </Box>
@@ -134,11 +137,11 @@ export function App(props: AppProps): ReactElement {
   )
 }
 
-function FinalItemView(props: { item: FinalItem; width: number; gap?: number }): ReactElement {
+function FinalItemView(props: { item: FinalItem; width: number }): ReactElement {
   const { item, width } = props
   switch (item.kind) {
     case 'banner':
-      return <WelcomeBanner item={item} width={width} gap={props.gap} />
+      return <WelcomeBanner item={item} width={width} />
     case 'user':
       return (
         <Box flexDirection="column">
@@ -456,6 +459,119 @@ function formatElapsed(ms: number): string {
   if (ms < 1000) return `${ms}ms`
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
   return `${Math.floor(ms / 60_000)}m${Math.floor((ms % 60_000) / 1000)}s`
+}
+
+// -- Splash filler sizing -----------------------------------------------------
+//
+// The filler must absorb every layout change without letting the live frame's
+// top edge cross into the Static region (which would erase transcript rows),
+// so heights are estimated with an upward bias: an overestimate only leaves a
+// cosmetic gap above the status bar, never data loss.
+
+/** Upper-bound row count of `text` after terminal wrapping at `width`. */
+function wrappedLines(text: string, width: number): number {
+  if (text === '') return 1
+  let cells = 0
+  for (const ch of Array.from(text)) cells += charWidth(ch)
+  return Math.max(1, Math.ceil(cells / Math.max(8, width)) + 1)
+}
+
+/** Estimated rendered rows of one settled transcript item (≥ actual). */
+function estimateItemHeight(item: FinalItem, width: number): number {
+  switch (item.kind) {
+    case 'banner':
+      return BANNER_BOX_HEIGHT
+    case 'user':
+      return item.text.split('\n').reduce((n, line) => n + wrappedLines(line, width), 0) +
+        (item.images?.length ?? 0)
+    case 'assistant':
+      // Exact: the same renderer the view uses.
+      return renderMarkdownLines(item.text, width).length + (item.interrupted ? 1 : 0)
+    case 'notice':
+      return wrappedLines(item.text, width)
+    case 'panel':
+      return 3 + wrappedLines(item.title, width) +
+        item.lines.reduce((n, line) => n + wrappedLines(line, width), 0)
+    case 'tool':
+      // Result lines are shown capped, but counting them uncapped keeps the
+      // estimate safely above the real card height.
+      return 3 + wrappedLines(item.title, width) + item.result.split('\n').length + 1
+  }
+}
+
+/** Estimated rows of the question/approval card (≥ actual). */
+function estimateQuestionHeight(question: ActiveQuestion, width: number): number {
+  const item = question.item
+  let h = 4 // borders + title + hint row
+  if (item.header !== undefined && item.header !== '') h += 1
+  if (item.detail !== undefined && item.detail !== '') {
+    if (item.intent?.kind === 'plan-review') {
+      h += renderMarkdownLines(item.detail, Math.max(24, width - 4)).length + 1
+    } else {
+      h += wrappedLines(item.detail, width - 4)
+    }
+  }
+  h += (item.options ?? []).length
+  return h
+}
+
+/**
+ * Blank rows that keep the first screen at viewport height:
+ * `rows - banner - settled transcript - live region`, clamped at 0.
+ */
+function computeFiller(
+  snap: Snapshot,
+  width: number,
+  rows: number | undefined,
+  inputHeight: number,
+): number {
+  if (rows === undefined || rows <= 0 || rows >= 1000) return 0
+  // Rendered-height cache: transcript items are immutable, so each object's
+  // height is computed once per width (markdown wrapping is the pricey part).
+  const cache = fillerCache
+  if (cache.width !== width) {
+    cache.width = width
+    cache.map = new WeakMap()
+  }
+  let settled = 0
+  for (const item of snap.items) {
+    // The banner is accounted for by the BANNER_BOX_HEIGHT reservation below.
+    if (item.kind === 'banner') continue
+    const cached = cache.map.get(item)
+    if (cached !== undefined) {
+      settled += cached
+      continue
+    }
+    const h = estimateItemHeight(item, width)
+    cache.map.set(item, h)
+    settled += h
+  }
+
+  const questionHeight = snap.question !== null
+    ? estimateQuestionHeight(snap.question, width)
+    : 0
+  const streamingHeight = snap.streaming !== ''
+    ? renderMarkdownLines(snap.streaming, width).length
+    : 0
+  const live =
+    streamingHeight +
+    snap.pendingTools.length +
+    (snap.approval !== null ? 5 : 0) +
+    questionHeight +
+    (snap.todos.length > 0 ? 3 + Math.min(8, snap.todos.length) + (snap.todos.length > 8 ? 1 : 0) : 0) +
+    (snap.queuedMessages.length > 0 ? Math.min(5, snap.queuedMessages.length) + (snap.queuedMessages.length > 5 ? 1 : 0) : 0) +
+    (snap.exitArmed ? 1 : 0) +
+    1 + // status bar
+    inputHeight +
+    1 // trailing-newline budget: the first frame scrolls exactly its row count,
+    // so one reserved row keeps the banner's top border on screen
+  return Math.max(0, rows - BANNER_BOX_HEIGHT - settled - live)
+}
+
+/** Width-keyed per-item height cache; replaced wholesale when the width changes. */
+const fillerCache: { width: number; map: WeakMap<object, number> } = {
+  width: -1,
+  map: new WeakMap(),
 }
 
 function truncateLine(line: string, width: number): string {

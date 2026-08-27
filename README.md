@@ -31,9 +31,9 @@
 ### 对话与渲染
 
 - **启动横幅**：进程启动时在屏幕顶缘渲染 ASCII 品牌盒（box-drawing 边框 +
-  FX ASCII logo + 模型/版本/会话/工作目录），首帧撑满视口、输入框钉底
-  （Claude Code 式启动画面），随对话自然滚入 scrollback；
-  窄终端自动降级（先截断值、再隐藏 logo）
+  FX ASCII logo + 模型/版本/会话/工作目录）。视口空白是**弹性**的：会话不足
+  一屏时新消息先消耗空白，横幅钉在顶缘、输入框钉底、零滚动（Claude Code 式）；
+  内容超屏后自然滚动、横幅逐行滚入 scrollback。窄终端自动降级（先截断值、再隐藏 logo）
 - **滚动式聊天界面**：主屏保留终端 scrollback，历史可搜索、可复制
 - **流式 Markdown 渲染**：代码高亮（cli-highlight）、CJK 感知换行（wrap-ansi）
 - **多行输入框**：光标编辑、输入历史（↑/↓）、粘贴通道（bracketed paste）、

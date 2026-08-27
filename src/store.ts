@@ -157,6 +157,7 @@ export class TuiStore {
   private exitTimer: ReturnType<typeof setTimeout> | null = null
   private echoedId: string | null = null
   private replaying = false
+  private lastBanner: Omit<BannerItem, 'kind'> | null = null
   private snapshot!: Snapshot
   private readonly listeners = new Set<() => void>()
   private flushTimer: ReturnType<typeof setInterval> | null = null
@@ -442,6 +443,12 @@ export class TuiStore {
     this.sessionId = sessionId
     this.model = model
     this.items = []
+    if (this.lastBanner !== null) {
+      // Fresh batch, fresh facts: the banner re-leads the transcript with the
+      // switched-to session's id and model.
+      this.lastBanner = { ...this.lastBanner, sessionId, model }
+      this.items.push({ kind: 'banner', ...this.lastBanner })
+    }
     this.pendingTools.clear()
     this.pendingImages = []
     this.queuedMessages = []
@@ -493,9 +500,10 @@ export class TuiStore {
   }
 
   /** Drop already-rendered transcript items; the previous Ink mount's Static
-   * output stays in the terminal scrollback, so a fresh mount must not re-render it. */
+   * output stays in the terminal scrollback, so a fresh mount must not re-render it.
+   * The banner leads the fresh batch (its previous copy was flushed away). */
   discardRenderedItems(): void {
-    this.items = []
+    this.items = this.lastBanner !== null ? [{ kind: 'banner', ...this.lastBanner }] : []
     this.commit()
   }
 
@@ -510,8 +518,11 @@ export class TuiStore {
     this.commit()
   }
 
-  /** Welcome banner as the transcript's first item; push before any replay. */
+  /** Welcome banner as the transcript's first item; push before any replay.
+   * Remembered so session switches and external-editor re-mounts can lead a
+   * fresh Static batch with the banner again. */
   addBanner(banner: Omit<BannerItem, 'kind'>): void {
+    this.lastBanner = banner
     this.items.push({ kind: 'banner', ...banner })
     this.commit()
   }

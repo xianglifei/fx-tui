@@ -52,7 +52,7 @@ import { App } from './ui/App.js'
 import type { MenuEntry } from './ui/Input.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.6.0'
+export const FX_TUI_VERSION = '0.6.1'
 
 /** Stable Cordis plugin name. */
 export const name = 'fx-tui-runner'
