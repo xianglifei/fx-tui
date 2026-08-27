@@ -35,7 +35,7 @@ fx --resume <id>                    # 恢复会话
 | `Ctrl+C` | 清空输入；空输入时再按一次退出 |
 | `y` `s` `a` `n` | 审批：一次 / 本会话 / 总是（记住）/ 拒绝 |
 | 数字键 | 问题选项选择 |
-| `/help` `/status` `/sessions` `/model` `/export` `/edit` `/image <路径…>` `/exit` | 内置命令（`/` 查看全部） |
+| `/help` `/status` `/sessions` `/model` `/export` `/edit` `/image <路径…>` `/update` `/exit` | 内置命令（`/` 查看全部） |
 
 ### 审批记忆
 
@@ -105,6 +105,11 @@ fx --resume <id>                    # 恢复会话
 - **subagent 徽标**：子 agent 运行时状态栏显示 `🌱×N`
 - **会话导出**：`/export` 导出为 Markdown 时间线；`fx --resume <id>` 恢复会话
 - **运行状态面板**：`/status` 显示版本/模型/会话/上下文/工作区 + 已加载插件树
+- **自我升级**：`/update` 在 TUI 内完成「fetch → 快进合并 → 装依赖 → 重建」（适用于
+  docs/install.md 的 git 克隆安装）：脏工作区先拦截、列出改动文件（确认可舍弃用
+  `/update --force`），只快进不合并不产生本地 merge 提交，断网 / 冲突 / 构建失败均给出
+  修复指引；无新提交时直接告结。node_modules 安装形态与非 git 目录自动转为对应的手动升级说明。
+  升级落盘后**重启才生效**（运行中的进程仍是旧代码）
 
 ## License
 

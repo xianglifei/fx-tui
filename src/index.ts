@@ -14,7 +14,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, resolve } from 'node:path'
@@ -51,9 +51,10 @@ import type { ApprovalMode, ToolPresenter } from './store.js'
 import { blocksToTextOf, formatToolArgs, toolResultCallIdOf, toolResultTextOf } from './store.js'
 import { App } from './ui/App.js'
 import type { MenuEntry } from './ui/Input.js'
+import { installedRoot, performSelfUpdate } from './update.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.9.0'
+export const FX_TUI_VERSION = '0.10.0'
 
 /** Stable Cordis plugin name. */
 export const name = 'fx-tui-runner'
@@ -274,6 +275,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     { name: 'export', description: '导出当前会话为 Markdown', kind: 'builtin' },
     { name: 'edit', description: '用 $EDITOR 编写长消息', kind: 'builtin' },
     { name: 'image', description: '附加图片：<路径>… 或直接拖入终端；空参查看明细', kind: 'builtin' },
+    { name: 'update', description: '拉取 fx-tui 最新代码并重建（git 克隆安装时可用）', kind: 'builtin' },
     { name: 'exit', description: '退出 fx-tui', kind: 'builtin' },
   ]
 
@@ -474,6 +476,55 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     }
   }
 
+  let updating = false
+
+  /** `/update`: self-update the git clone this TUI runs from. All work happens
+   * in that directory; the live process keeps its old modules until restart. */
+  async function runUpdate(force: boolean): Promise<void> {
+    if (updating) {
+      store.addNotice('/update 已在执行中，请等当前一次结束', 'warn')
+      return
+    }
+    updating = true
+    try {
+      const root = installedRoot()
+      if (root === null || !existsSync(resolve(root, '.git'))) {
+        store.addPanel('fx-tui 无法自更新', [
+          `未能定位安装目录或缺少 .git：${root ?? '(unknown)'}`,
+          '源码克隆安装才支持 /update；安装步骤见 docs/install.md。',
+        ])
+        return
+      }
+      if (root.split('/').includes('node_modules')) {
+        store.addPanel('检测到包管理器安装', [
+          `安装位置在 node_modules 下：${root}`,
+          'npm 分发未启用前没有自动升级通道；发布后可用 npm i -g fx-tui 升级。',
+          '',
+          '提示：按 docs/install.md 做 git 克隆安装即可用 /update 自动升级。',
+        ])
+        return
+      }
+      const outcome = await performSelfUpdate(
+        { root, force, currentVersion: FX_TUI_VERSION },
+        (step: string) => store.addNotice(step),
+      )
+      if (outcome.ok && outcome.applied) {
+        store.addPanel(
+          'fx-tui 升级完成',
+          [...outcome.lines, '', '重启生效：空输入时双击 Ctrl+C 退出，重新运行 fx'],
+        )
+      } else if (outcome.ok) {
+        store.addNotice(outcome.lines[0] ?? '已是最新')
+      } else {
+        store.addPanel('fx-tui 升级未完成', outcome.lines)
+      }
+    } catch (error) {
+      store.addNotice(`/update 异常中断：${error instanceof Error ? error.message : String(error)}`, 'error')
+    } finally {
+      updating = false
+    }
+  }
+
   function listCommands(): readonly MenuEntry[] {
     const dsh: MenuEntry[] = []
     try {
@@ -500,7 +551,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
             'Ctrl+C 清空输入（空输入双击退出）',
             '',
             '内置命令：/help 帮助 · /config 设置（含启动默认权限模式） · /edit 用 $EDITOR 写长消息 ·',
-            '  /image <路径…> 附加图片（可拖拽入窗）· 空参查看明细 · /image clear 清空 · /exit 退出',
+            '  /image <路径…> 附加图片（可拖拽入窗，空参看明细）· /update 升级自身 · /exit 退出',
             'dsh 命令（来自注册表）：/compact 压缩历史 · /goal 长任务目标 ·',
             '  /feedback 反馈（输入 / 查看全部）',
           ])
@@ -568,6 +619,15 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
             return
           }
           await attachImagePaths(tokens)
+          return
+        }
+        case 'update': {
+          const argTokens = rest.split(/\s+/).filter(token => token !== '')
+          if (argTokens.some(token => token !== '--force' && token.toLowerCase() !== 'force')) {
+            store.addNotice('用法：/update [--force]（--force 允许带着未提交改动升级）', 'warn')
+            return
+          }
+          await runUpdate(argTokens.length > 0)
           return
         }
         case 'forget': case 'forget-approvals':

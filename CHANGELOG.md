@@ -3,6 +3,30 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.10.0] - 2026-08-27
+
+### 自我升级：/update
+
+- **新命令 `/update`**：在 TUI 内对当前安装目录执行完整升级流水线——
+  `git fetch origin <分支>` → 比对远端 → `git pull --ff-only` → `pnpm install`
+  （frozen 失败自动降级常规安装）→ `pnpm run build`，各阶段带进度通知与
+  wall-clock 超时（超时强杀整棵进程树）。适用于 git 克隆安装（docs/install.md 流程）
+- **安全防呆**：脏工作区（已跟踪文件的未提交改动）默认拒绝升级并列出文件，
+  `/update --force` 显式放行；detached HEAD 与异常字符分支名直接拒执行；
+  只允许 fast-forward，绝不制造本地 merge 提交；网络失败 / 合并冲突 / 构建报错
+  均展示原始错误尾部并附具体修复命令
+- **升级前先查远端**：本地与 `origin/<分支>` 一致时直接返回「已是最新」，
+  不白跑 install/build
+- **升级完成面板**：报告应用提交数与新版本号（通过 cache-bust 动态 import 新构建
+  的 `lib/index.js` 读取 `FX_TUI_VERSION`，未升版本号时如实说明），并明确提示
+  运行中的进程仍是旧代码、需退出重开 fx 才生效
+- **新模块 `src/update.ts`**：shell 执行器（detached 进程组 + 树级 SIGKILL +
+  输出尾部裁剪）、pnpm/corepack 双通道解析（login shell 保证 GUI 启动时的 PATH）、
+  纯逻辑无 UI 依赖，由 index.ts 映射为通知与面板
+- 其余安装形态一律拒自动升级并给出对应手动指引：node_modules 目录提示走包管理器
+  （npm 分发启用后为 `npm i -g fx-tui`），缺 `.git` 目录指向 docs/install.md；
+  `/help`、命令菜单、README 同步收录 `/update`；版本号升至 0.10.0
+
 ## [0.9.0] - 2026-08-27
 
 ### 图片拖拽直入与附件托盘
