@@ -24,18 +24,30 @@ export function renderMarkdownLines(md: string, width: number): string[] {
   return out.length > 0 ? out : [' ']
 }
 
+/**
+ * One blank row between blocks, never more: marked emits `space` tokens for
+ * blank-line runs ON TOP OF each block's own trailing separator, so naive
+ * `push('')` stacking renders double-height gaps inside a reply. Blocks at the
+ * very start of a reply get no leading blank either — message-boundary spacing
+ * is App.tsx's job, kept uniform with it.
+ */
+function pushBlank(out: string[]): void {
+  if (out.length === 0 || out[out.length - 1] === '') return
+  out.push('')
+}
+
 function renderBlock(token: Token, out: string[], width: number): void {
   switch (token.type) {
     case 'heading': {
       const t = token as Tokens.Heading
       out.push(...wrap(chalk.bold.cyanBright(inline(t.tokens)), width, 0))
-      out.push('')
+      pushBlank(out)
       break
     }
     case 'paragraph': {
       const t = token as Tokens.Paragraph
       out.push(...wrap(inline(t.tokens), width, 0))
-      out.push('')
+      pushBlank(out)
       break
     }
     case 'code': {
@@ -49,7 +61,7 @@ function renderBlock(token: Token, out: string[], width: number): void {
         out.push(...wrap(line, width, 2))
       }
       out.push(rule)
-      out.push('')
+      pushBlank(out)
       break
     }
     case 'list': {
@@ -66,7 +78,7 @@ function renderBlock(token: Token, out: string[], width: number): void {
         out.push(marker + (body[0] ?? ''))
         for (const line of body.slice(1)) out.push(`  ${line}`)
       })
-      out.push('')
+      pushBlank(out)
       break
     }
     case 'blockquote': {
@@ -74,21 +86,21 @@ function renderBlock(token: Token, out: string[], width: number): void {
       const inner: string[] = []
       for (const child of t.tokens) renderBlock(child, inner, Math.max(12, width - 2))
       for (const line of inner) out.push(`${chalk.dim('│ ')}${chalk.dim(line)}`)
-      out.push('')
+      pushBlank(out)
       break
     }
     case 'hr': {
       out.push(chalk.dim('─'.repeat(width)))
-      out.push('')
+      pushBlank(out)
       break
     }
     case 'table': {
       renderTable(token as Tokens.Table, out, width)
-      out.push('')
+      pushBlank(out)
       break
     }
     case 'space': {
-      out.push('')
+      pushBlank(out)
       break
     }
     case 'html': {

@@ -8,6 +8,8 @@ import { useSyncExternalStore } from 'react'
 import { useState } from 'react'
 import type { ReactElement } from 'react'
 import { Box, Static, Text, useInput, useStdout } from 'ink'
+import stringWidth from 'string-width'
+import wrapAnsi from 'wrap-ansi'
 import type {
   ActiveQuestion,
   ApprovalMode,
@@ -79,7 +81,7 @@ export function App(props: AppProps): ReactElement {
           <FinalItemView
             key={index}
             item={item}
-            width={item.kind === 'banner' ? bannerWidth : width}
+            width={item.kind === 'banner' || item.kind === 'user' ? bannerWidth : width}
           />
         )}
       </Static>
@@ -142,6 +144,46 @@ export function App(props: AppProps): ReactElement {
   )
 }
 
+/** Prompt glyph prefixing every user-message row. */
+const USER_PROMPT = '❯ '
+
+/**
+ * User-bar tint as a literal hex, deliberately not a named ANSI color: themes
+ * remap ANSI gray/light tones towards the theme's own palette — on light-theme
+ * terminals "gray" lands near-white and the bar vanishes. The hue mirrors the
+ * welcome-banner's rendered teal accent (~181°, brand-cyan family; yellow is
+ * reserved for warnings) at pastel lightness, so the bar reads as part of the
+ * app's existing palette; near-black text over it stays readable on both light
+ * and dark terminals, and chalk degrades the hex gracefully off truecolor.
+ */
+const USER_BAR_BACKGROUND = '#bdeef2'
+
+/**
+ * Full-gutter rows of a settled user message: each source line hard-wraps at
+ * the terminal edge (same wrap Ink applies to plain Texts) and every visual
+ * row is padded to the full width, so the tinted bar spans the whole line and
+ * never soft-wraps into a second, unpadded row.
+ */
+function userBarRows(text: string, columns: number): readonly string[] {
+  const width = Math.max(24, columns)
+  const rows: string[] = []
+  for (const line of text.split('\n')) {
+    const wrapped = wrapAnsi(`${USER_PROMPT}${line}`, width, { hard: true, trim: false })
+    for (const row of wrapped.split('\n')) {
+      const pad = width - stringWidth(row)
+      rows.push(pad > 0 ? row + ' '.repeat(pad) : row)
+    }
+  }
+  return rows
+}
+
+/** One blank row above every user message and assistant reply: the settled
+ * transcript keeps a uniform rhythm of a single blank row between items —
+ * matching the intra-reply block spacing the markdown renderer emits. */
+function LeadGap(): ReactElement {
+  return <Text>{' '}</Text>
+}
+
 function FinalItemView(props: { item: FinalItem; width: number }): ReactElement {
   const { item, width } = props
   switch (item.kind) {
@@ -150,8 +192,9 @@ function FinalItemView(props: { item: FinalItem; width: number }): ReactElement 
     case 'user':
       return (
         <Box flexDirection="column">
-          {item.text.split('\n').map((line, i) => (
-            <Text key={i} color="cyan" bold>{`❯ ${line}`}</Text>
+          <LeadGap />
+          {userBarRows(item.text, width).map((row, i) => (
+            <Text key={i} backgroundColor={USER_BAR_BACKGROUND} color="black" bold>{row}</Text>
           ))}
           {(item.images ?? []).map((label, i) => (
             <Text key={`img-${i}`} color="magenta" dimColor>{`📎 ${label}`}</Text>
@@ -161,6 +204,7 @@ function FinalItemView(props: { item: FinalItem; width: number }): ReactElement 
     case 'assistant':
       return (
         <Box flexDirection="column">
+          <LeadGap />
           {renderMarkdownLines(item.text, width).map((line, i) => (
             <Text key={i}>{line === '' ? ' ' : line}</Text>
           ))}
@@ -461,6 +505,7 @@ function StreamView(props: { text: string; width: number }): ReactElement {
   const lines = renderMarkdownLines(props.text, props.width)
   return (
     <Box flexDirection="column">
+      <LeadGap />
       {lines.map((line, i) => (
         <Text key={i}>{line === '' ? ' ' : line}</Text>
       ))}
@@ -492,11 +537,15 @@ function estimateItemHeight(item: FinalItem, width: number, columns: number): nu
     case 'banner':
       return BANNER_BOX_HEIGHT
     case 'user':
-      return item.text.split('\n').reduce((n, line) => n + textRows(`❯ ${line}`, columns), 0) +
+      // Exact: the bar wraps each source line with the same wrap-ansi options
+      // Ink applies, then pads every row to the full width (padding cannot
+      // re-wrap); +1 for the lead gap row.
+      return 1 + userBarRows(item.text, columns).length +
         (item.images?.length ?? 0)
     case 'assistant':
       // Exact: the same renderer the view uses; its lines fit within `width`.
-      return renderMarkdownLines(item.text, width).length + (item.interrupted ? 1 : 0)
+      // +1 lead gap row above every reply.
+      return 1 + renderMarkdownLines(item.text, width).length + (item.interrupted ? 1 : 0)
     case 'notice':
       return textRows(`${item.tone === 'error' ? '✗' : item.tone === 'warn' ? '⚠' : '·'} ${item.text}`, columns)
     case 'panel':
@@ -628,7 +677,7 @@ function computeFiller(
   }
 
   const live =
-    (snap.streaming !== '' ? renderMarkdownLines(snap.streaming, width).length : 0) +
+    (snap.streaming !== '' ? renderMarkdownLines(snap.streaming, width).length + 1 : 0) + // reply + lead gap
     snap.pendingTools.length +
     (snap.approval !== null ? estimateApprovalHeight(snap.approval, columns) : 0) +
     (snap.question !== null ? estimateQuestionHeight(snap.question, width, columns) : 0) +
