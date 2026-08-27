@@ -16,6 +16,7 @@ import type {
   ToolItem,
 } from '../store.js'
 import { formatToolArgs } from '../store.js'
+import type { MenuEntry } from './Input.js'
 import { renderFileDiffs } from '../diff.js'
 import { renderMarkdownLines } from '../markdown.js'
 import { InputBox } from './Input.js'
@@ -23,6 +24,7 @@ import { StatusBar } from './StatusBar.js'
 
 export interface AppActions {
   onSubmit(text: string): void
+  runCommand(line: string): void
   onInterrupt(): void
   onExit(): void
 }
@@ -31,6 +33,9 @@ export interface AppProps {
   store: TuiStore
   history: readonly string[]
   actions: AppActions
+  listCommands(): readonly MenuEntry[]
+  /** Initial editor content (external-editor re-mount). */
+  seed?: string
 }
 
 export function App(props: AppProps): ReactElement {
@@ -72,6 +77,10 @@ export function App(props: AppProps): ReactElement {
           history={props.history}
           frozen={frozen}
           questionFreeText={snap.question !== null && snap.questionFreeText}
+          seed={props.seed}
+          pendingImageCount={snap.pendingImages.length}
+          listCommands={props.listCommands}
+          runCommand={props.actions.runCommand}
           onSubmit={props.actions.onSubmit}
           onInterrupt={props.actions.onInterrupt}
           onExit={props.actions.onExit}
@@ -90,6 +99,9 @@ function FinalItemView(props: { item: FinalItem; width: number }): ReactElement 
         <Box flexDirection="column">
           {item.text.split('\n').map((line, i) => (
             <Text key={i} color="cyan" bold>{`❯ ${line}`}</Text>
+          ))}
+          {(item.images ?? []).map((label, i) => (
+            <Text key={`img-${i}`} color="magenta" dimColor>{`📎 ${label}`}</Text>
           ))}
         </Box>
       )

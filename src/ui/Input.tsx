@@ -1,7 +1,7 @@
 /**
  * The multiline input editor: code-point-aware cursor editing, input history,
- * and the keyboard contract for the whole app (submit, newline, interrupt,
- * clear, arm-exit).
+ * slash-command and @-path completion menus, and the keyboard contract for the
+ * whole app (submit, newline, interrupt, clear, arm-exit).
  *
  * Input arrives through two Ink channels: `useInput` for keystrokes and
  * `usePaste` for pasted text (bracketed paste mode). Multi-character chunks
@@ -9,10 +9,17 @@
  * line endings are normalized and a trailing newline behaves like Enter.
  */
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { Box, Text, useInput, usePaste } from 'ink'
 import type { TuiStore } from '../store.js'
+import { fuzzyMatchPaths, listWorkspaceFiles } from '../workspace-files.js'
+
+export interface MenuEntry {
+  readonly name: string
+  readonly description: string
+  readonly kind: 'builtin' | 'dsh'
+}
 
 export interface InputBoxProps {
   store: TuiStore
@@ -20,6 +27,11 @@ export interface InputBoxProps {
   frozen: boolean
   /** A pending free-text question: Enter answers it instead of sending a message. */
   questionFreeText: boolean
+  /** Initial editor content (used when re-mounting after the external editor). */
+  seed?: string
+  pendingImageCount: number
+  listCommands(): readonly MenuEntry[]
+  runCommand(line: string): void
   onSubmit(text: string): void
   onInterrupt(): void
   onExit(): void
@@ -31,17 +43,80 @@ interface EditorState {
   col: number
 }
 
+interface Menu {
+  kind: 'commands' | 'files'
+  query: string
+  entries: readonly { label: string; description: string }[]
+  index: number
+}
+
 const HELP_TEXT =
-  'Enter 发送 · Ctrl+J 换行 · ↑↓ 翻输入历史 · Esc 中断/清空 · Ctrl+O 工具详情切换 · ' +
-  'Ctrl+C 清空，空输入时双击退出 · /exit 退出 · /help 帮助'
+  'Enter 发送 · Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全 · Esc 中断/清空 · Ctrl+O 工具详情 · ' +
+  'Ctrl+C 清空，空输入时双击退出 · /help 帮助 · /edit 外部编辑器 · /image <路径> 附加图片'
+
+const MENU_SIZE = 8
 
 export function InputBox(props: InputBoxProps): ReactElement {
-  const { store, history, frozen, questionFreeText, onSubmit, onInterrupt, onExit } = props
-  const [ed, setEd] = useState<EditorState>({ lines: [''], row: 0, col: 0 })
+  const { store, history, frozen, questionFreeText, seed, pendingImageCount, listCommands, runCommand, onSubmit, onInterrupt, onExit } = props
+  const [ed, setEd] = useState<EditorState>(() => seedToState(seed))
   const [histIdx, setHistIdx] = useState(-1)
   const [draft, setDraft] = useState<string | null>(null)
+  const [menu, setMenu] = useState<Menu | null>(null)
+  const menuIndexRef = useRef(0)
+  const dismissedQueryRef = useRef<string | null>(null)
 
   const isEmpty = ed.lines.length === 1 && ed.lines[0] === ''
+
+  // -- Completion menu derivation -------------------------------------------
+
+  useEffect(() => {
+    if (frozen || questionFreeText) {
+      setMenu(null)
+      return
+    }
+    const text = ed.lines.join('\n')
+    const line = ed.lines[ed.row] ?? ''
+    const before = Array.from(line).slice(0, ed.col).join('')
+
+    // Slash menu: the whole input is one unfinished command word.
+    if (text.startsWith('/') && !text.includes(' ') && !text.includes('\n')) {
+      const query = text.slice(1).toLowerCase()
+      if (dismissedQueryRef.current === `/${query}`) {
+        setMenu(null)
+        return
+      }
+      const entries = listCommands()
+        .filter(entry => entry.name.toLowerCase().startsWith(query))
+        .slice(0, MENU_SIZE)
+        .map(entry => ({ label: `/${entry.name}`, description: entry.description }))
+      const index = Math.min(menuIndexRef.current, Math.max(0, entries.length - 1))
+      setMenu(entries.length > 0 ? { kind: 'commands', query, entries, index } : null)
+      return
+    }
+
+    // File menu: an @-reference word at the cursor.
+    const at = before.lastIndexOf('@')
+    if (at >= 0 && !before.slice(at + 1).includes(' ')) {
+      const query = before.slice(at + 1)
+      if (dismissedQueryRef.current === `@${query}`) {
+        setMenu(null)
+        return
+      }
+      let cancelled = false
+      void listWorkspaceFiles(process.cwd()).then(files => {
+        if (cancelled) return
+        const entries = fuzzyMatchPaths(query, files, MENU_SIZE)
+          .map(match => ({ label: match.path, description: '' }))
+        const index = Math.min(menuIndexRef.current, Math.max(0, entries.length - 1))
+        setMenu(entries.length > 0 ? { kind: 'files', query, entries, index } : null)
+      })
+      return () => { cancelled = true }
+    }
+    setMenu(null)
+    return
+  }, [ed, frozen, questionFreeText, listCommands])
+
+  // -- Keyboard --------------------------------------------------------------
 
   useInput((input, key) => {
     if (frozen) return
@@ -60,6 +135,11 @@ export function InputBox(props: InputBoxProps): ReactElement {
     }
 
     if (key.escape) {
+      if (menu !== null) {
+        dismissedQueryRef.current = menu.kind === 'commands' ? `/${menu.query}` : `@${menu.query}`
+        setMenu(null)
+        return
+      }
       if (questionFreeText) {
         store.skipQuestion()
         return
@@ -72,6 +152,37 @@ export function InputBox(props: InputBoxProps): ReactElement {
         setDraft(null)
       }
       return
+    }
+
+    // Menu navigation takes the arrows, Tab, and Enter while it is open.
+    if (menu !== null && menu.entries.length > 0) {
+      if (key.upArrow) {
+        menuIndexRef.current = Math.max(0, menu.index - 1)
+        setMenu({ ...menu, index: menuIndexRef.current })
+        return
+      }
+      if (key.downArrow) {
+        menuIndexRef.current = Math.min(menu.entries.length - 1, menu.index + 1)
+        setMenu({ ...menu, index: menuIndexRef.current })
+        return
+      }
+      if (key.tab) {
+        applyMenuCompletion(menu.entries[menu.index]!.label)
+        return
+      }
+      if (key.return) {
+        if (menu.kind === 'commands') {
+          const entry = menu.entries[menu.index]!
+          runCommand(entry.label)
+          setEd({ lines: [''], row: 0, col: 0 })
+          setHistIdx(-1)
+          setDraft(null)
+        } else {
+          applyMenuCompletion(menu.entries[menu.index]!.label)
+        }
+        return
+      }
+      // Any other key falls through to normal editing; the menu re-derives.
     }
 
     // Coalesced typing or piped automation: insert as (multi-)line text and
@@ -184,7 +295,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
     if (key.ctrl || key.meta) return
     if (input.length > 0 && input !== '\r') {
       setEd(current => {
-        const chars = Array.from(current.lines[current.row] ?? '')
+        const chars = Array.from(current.lines[current.row] ?? [])
         const lines = [...current.lines]
         lines.splice(
           current.row,
@@ -200,6 +311,28 @@ export function InputBox(props: InputBoxProps): ReactElement {
     if (frozen) return
     insertChunk(text, false)
   })
+
+  // -- Menu helpers -----------------------------------------------------------
+
+  function applyMenuCompletion(label: string): void {
+    if (menu === null) return
+    dismissedQueryRef.current = null
+    if (menu.kind === 'commands') {
+      setEd({ lines: [`${label} `], row: 0, col: label.length + 1 })
+      return
+    }
+    setEd(current => {
+      const chars = Array.from(current.lines[current.row] ?? [])
+      const line = chars.join('')
+      const before = chars.slice(0, current.col).join('')
+      const at = before.lastIndexOf('@')
+      if (at < 0) return current
+      const completed = `${line.slice(0, at)}@${label} ${line.slice(current.col)}`
+      return { lines: [...current.lines.slice(0, current.row), completed, ...current.lines.slice(current.row + 1)], row: current.row, col: at + label.length + 2 }
+    })
+  }
+
+  // -- Editing helpers ----------------------------------------------------------
 
   function insertNewline(): void {
     setEd(current => {
@@ -257,17 +390,10 @@ export function InputBox(props: InputBoxProps): ReactElement {
   }
 
   function submitText(text: string): void {
-    const trimmed = text.trim()
-    if (trimmed === '') return
-    const command = trimmed.toLowerCase()
-    if (command === '/exit' || command === '/quit' || command === '/bye') {
-      onExit()
-      return
-    }
-    if (command === '/help') {
-      store.addNotice(HELP_TEXT)
+    if (text.startsWith('/') && !text.includes('\n')) {
+      runCommand(text)
     } else {
-      onSubmit(trimmed)
+      onSubmit(text)
     }
     setEd({ lines: [''], row: 0, col: 0 })
     setHistIdx(-1)
@@ -294,22 +420,48 @@ export function InputBox(props: InputBoxProps): ReactElement {
     setEd({ lines, row: lines.length - 1, col: Array.from(lines[lines.length - 1] ?? '').length })
   }
 
+  // -- Render -------------------------------------------------------------------
+
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={frozen ? 'gray' : 'cyan'} paddingX={1}>
-      {isEmpty && histIdx === -1 && (
-        <Text dimColor>
-          {questionFreeText ? '输入你的回答，Enter 提交（Esc 跳过）…' : '说点什么…（Enter 发送 · Ctrl+J 换行 · /help 查看按键）'}
-        </Text>
+    <Box flexDirection="column">
+      {menu !== null && menu.entries.length > 0 && (
+        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
+          {menu.entries.map((entry, index) => (
+            <Text key={entry.label} inverse={index === menu.index}>
+              {`${entry.label}${entry.description !== '' ? `  ${entry.description}` : ''}`}
+            </Text>
+          ))}
+          <Text dimColor>↑↓ 选择 · Tab 补全 · Enter {menu.kind === 'commands' ? '执行' : '补全'} · Esc 关闭</Text>
+        </Box>
       )}
-      {ed.lines.map((line, index) => (
-        <Text key={index}>
-          {index === ed.row
-            ? <CursorLine line={line} col={ed.col} />
-            : (line === '' ? ' ' : line)}
-        </Text>
-      ))}
+      <Box flexDirection="column" borderStyle="round" borderColor={frozen ? 'gray' : 'cyan'} paddingX={1}>
+        {isEmpty && histIdx === -1 && (
+          <Text dimColor>
+            {questionFreeText
+              ? '输入你的回答，Enter 提交（Esc 跳过）…'
+              : '说点什么…（Enter 发送 · / 命令 · @ 文件 · /help 查看按键）'}
+          </Text>
+        )}
+        {pendingImageCount > 0 && (
+          <Text color="magenta">{`📎 已附加 ${pendingImageCount} 张图片，将随下一条消息发送`}</Text>
+        )}
+        {ed.lines.map((line, index) => (
+          <Text key={index}>
+            {index === ed.row
+              ? <CursorLine line={line} col={ed.col} />
+              : (line === '' ? ' ' : line)}
+          </Text>
+        ))}
+      </Box>
     </Box>
   )
+}
+
+function seedToState(seed: string | undefined): EditorState {
+  if (seed === undefined || seed === '') return { lines: [''], row: 0, col: 0 }
+  const lines = seed.split('\n')
+  const last = lines[lines.length - 1] ?? ''
+  return { lines, row: lines.length - 1, col: Array.from(last).length }
 }
 
 /** Pure splice of multi-line text into an editor state at its cursor. */

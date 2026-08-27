@@ -13,13 +13,14 @@
  */
 
 import type { ContentBlock, TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswer, AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
 
 // -- Transcript items ---------------------------------------------------------
 
-export interface UserItem { readonly kind: 'user'; readonly text: string }
+export interface UserItem { readonly kind: 'user'; readonly text: string; readonly images?: readonly string[] }
 export interface AssistantItem { readonly kind: 'assistant'; readonly text: string; readonly interrupted: boolean }
 
 export interface ToolItem {
@@ -63,12 +64,18 @@ export interface ActiveQuestion {
   readonly total: number
 }
 
+export interface PendingImage {
+  readonly ref: ImageAttachmentRef
+  readonly label: string
+}
+
 export type Phase = 'idle' | 'thinking' | 'streaming' | 'tool'
 
 export interface Snapshot {
   readonly version: number
   readonly items: readonly FinalItem[]
   readonly pendingTools: readonly PendingTool[]
+  readonly pendingImages: readonly PendingImage[]
   readonly streaming: string
   readonly phase: Phase
   readonly phaseDetail: string
@@ -102,6 +109,7 @@ const RESULT_PREVIEW_LIMIT = 800
 export class TuiStore {
   private items: FinalItem[] = []
   private pendingTools = new Map<string, PendingTool>()
+  private pendingImages: PendingImage[] = []
   private streamBuf = ''
   private streamText = ''
   private phase: Phase = 'idle'
@@ -148,6 +156,7 @@ export class TuiStore {
       version: this.snapshot?.version !== undefined ? this.snapshot.version + 1 : 1,
       items: [...this.items],
       pendingTools: [...this.pendingTools.values()],
+      pendingImages: [...this.pendingImages],
       streaming: this.streamText,
       phase: this.phase,
       phaseDetail: this.phaseDetail,
@@ -346,11 +355,33 @@ export class TuiStore {
   // -- Local actions -------------------------------------------------------
 
   /** Echo a submitted message immediately; the matching session event is deduped by id. */
-  echoUser(id: string, text: string): void {
+  echoUser(id: string, text: string, images?: readonly string[]): void {
     this.echoedId = id
-    this.items.push({ kind: 'user', text })
+    this.items.push({ kind: 'user', text, ...(images !== undefined && images.length > 0 ? { images } : {}) })
     this.phase = 'thinking'
     this.phaseDetail = ''
+    this.commit()
+  }
+
+  /** Queue an image to ride along with the next submitted message. */
+  addPendingImage(ref: ImageAttachmentRef, label: string): void {
+    this.pendingImages.push({ ref, label })
+    this.commit()
+  }
+
+  /** Take and clear the queued images (called when the next message is submitted). */
+  consumePendingImages(): PendingImage[] {
+    if (this.pendingImages.length === 0) return []
+    const images = this.pendingImages
+    this.pendingImages = []
+    this.commit()
+    return images
+  }
+
+  /** Drop already-rendered transcript items; the previous Ink mount's Static
+   * output stays in the terminal scrollback, so a fresh mount must not re-render it. */
+  discardRenderedItems(): void {
+    this.items = []
     this.commit()
   }
 

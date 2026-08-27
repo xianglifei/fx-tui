@@ -5,13 +5,18 @@
  * (or resumes) one persistent Agent, renders an Ink app over the session
  * event stream, answers approval requests from the keyboard (with
  * session/persistent memory), answers agent questions through the
- * user-questions seam, and shows live context pressure.
+ * user-questions seam, dispatches slash commands (built-ins plus the dsh
+ * command registry), completes @-file references, attaches images to the
+ * next message, and shows live context pressure.
  *
  * @module fx-tui
  */
 
 import { randomUUID } from 'node:crypto'
-import { appendFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, extname, isAbsolute, resolve } from 'node:path'
 import { createElement } from 'react'
 import { render } from 'ink'
 import type { Instance } from 'ink'
@@ -19,6 +24,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 // Declaration-merge carriers: importing these types registers the ctx keys and
@@ -26,7 +33,9 @@ import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai
 // approval/request, userQuestions, tokenMeter, cmdlineArgs, appExit).
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-cmdline'
+import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type {} from '@deepseek-ai/dsh-tools'
@@ -38,15 +47,16 @@ import { TuiStore } from './store.js'
 import type { ToolPresenter } from './store.js'
 import { formatToolArgs } from './store.js'
 import { App } from './ui/App.js'
+import type { MenuEntry } from './ui/Input.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.2.0'
+export const FX_TUI_VERSION = '0.3.0'
 
 /** Stable Cordis plugin name. */
 export const name = 'fx-tui-runner'
 
 /** Core services required before the TUI can drive an agent. */
-export const inject = ['agentDefaultModel', 'agents', 'sessions', 'userQuestions']
+export const inject = ['agentDefaultModel', 'agents', 'sessions', 'userQuestions', 'attachments', 'commands']
 
 const USAGE = `fx-tui v${FX_TUI_VERSION} — DeepSeek Harness 的交互式终端界面
 
@@ -57,8 +67,16 @@ const USAGE = `fx-tui v${FX_TUI_VERSION} — DeepSeek Harness 的交互式终端
   -h, --help             显示帮助
   -v, --version          显示版本
 
-按键：Enter 发送 · Ctrl+J 换行 · ↑↓ 历史 · Esc 中断 · Ctrl+O 工具详情 · Ctrl+C 清空/双击退出
+按键：Enter 发送 · Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全 · Esc 中断 · Ctrl+O 工具详情 · Ctrl+C 清空/双击退出
 `
+
+const IMAGE_MEDIA_TYPES: Record<string, ImageMediaType> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+}
 
 interface CliOptions {
   resume?: string
@@ -180,7 +198,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     const pending = store.pendingToolFor(req.callId)
     const key = ApprovalMemory.key(req.toolName, pending?.args ?? '')
     if (pending !== undefined && memory.isAllowed(key)) {
-      store.addNotice(`已按记忆规则自动允许 ${req.toolName}（可用 /forget-approvals 清除）`)
+      store.addNotice(`已按记忆规则自动允许 ${req.toolName}（总是授权可删除 $DSH_HOME/fx-tui-allowlist.json 清除）`)
       return 'allowed-once'
     }
     const withdraw = (): void => { store.cancelApproval() }
@@ -212,6 +230,139 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
   const history: string[] = []
   let instance: Instance | null = null
 
+  // -- Slash commands ---------------------------------------------------------
+
+  const builtinCommands: readonly MenuEntry[] = [
+    { name: 'help', description: '查看按键与命令帮助', kind: 'builtin' },
+    { name: 'edit', description: '用 $EDITOR 编写长消息', kind: 'builtin' },
+    { name: 'image', description: '附加图片：<路径>，随下一条消息发送', kind: 'builtin' },
+    { name: 'exit', description: '退出 fx-tui', kind: 'builtin' },
+  ]
+
+  function listCommands(): readonly MenuEntry[] {
+    const dsh: MenuEntry[] = []
+    try {
+      for (const descriptor of ctx.commands.list(agent)) {
+        if (builtinCommands.some(builtin => builtin.name === descriptor.name)) continue
+        dsh.push({ name: descriptor.name, description: descriptor.description, kind: 'dsh' })
+      }
+    } catch { /* the registry is display-optional */ }
+    return [...builtinCommands, ...dsh]
+  }
+
+  async function runCommand(line: string): Promise<void> {
+    const trimmed = line.trim()
+    const name = trimmed.slice(1).split(/\s+/)[0]?.toLowerCase() ?? ''
+    const rest = trimmed.slice(1 + name.length).trim()
+    debugLog('command', trimmed)
+    try {
+      switch (name) {
+        case 'help':
+          store.addNotice(
+            'Enter 发送 · Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全 · Esc 中断/清空 · Ctrl+O 工具详情 · ' +
+            '/edit 外部编辑器 · /image <路径> 附加图片 · 双击 Ctrl+C 退出',
+          )
+          return
+        case 'exit': case 'quit': case 'bye':
+          await shutdown()
+          return
+        case 'edit':
+          await openExternalEditor()
+          return
+        case 'image':
+          await attachImage(rest)
+          return
+        case 'forget': case 'forget-approvals':
+          store.addNotice('总是授权记录在 $DSH_HOME/fx-tui-allowlist.json，删除该文件即可清除（本会话记忆随进程结束失效）', 'warn')
+          return
+        default: {
+          const commands = ctx.commands
+          if (commands.find(agent, name) !== undefined) {
+            const execution = await commands.execute(agent, trimmed, [], new AbortController().signal)
+            if (execution === undefined) {
+              store.addNotice(`/${name}：命令未执行（语法或名称未解析）`, 'warn')
+            } else if (execution.result.kind === 'error') {
+              store.addNotice(`/${name}：${execution.result.text}`, 'error')
+            } else if (execution.result.text !== undefined && execution.result.text !== '') {
+              store.addNotice(`/${name}：${execution.result.text}`)
+            } else {
+              store.addNotice(`/${name} 完成`)
+            }
+          } else {
+            store.addNotice(`未知命令：/${name}（输入 / 查看可用命令）`, 'warn')
+          }
+          return
+        }
+      }
+    } catch (error) {
+      store.addNotice(`命令执行失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+    }
+  }
+
+  async function attachImage(pathArg: string): Promise<void> {
+    if (pathArg === '') {
+      store.addNotice('用法：/image <图片路径>（支持 png / jpeg / webp / gif）', 'warn')
+      return
+    }
+    const expanded = pathArg.startsWith('~/') ? resolve(process.env.HOME ?? '~', pathArg.slice(2)) : pathArg
+    const absolute = isAbsolute(expanded) ? expanded : resolve(process.cwd(), expanded)
+    const mediaType = IMAGE_MEDIA_TYPES[extname(absolute).toLowerCase()]
+    if (mediaType === undefined) {
+      store.addNotice(`不支持的图片格式：${basename(absolute)}（支持 png / jpeg / webp / gif）`, 'error')
+      return
+    }
+    let data: Uint8Array
+    try {
+      data = new Uint8Array(readFileSync(absolute))
+    } catch (error) {
+      store.addNotice(`读取图片失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+      return
+    }
+    const name = basename(absolute)
+    try {
+      const [ref] = await ctx.attachments.saveImages([{ data, mediaType, name }])
+      if (ref === undefined) {
+        store.addNotice('图片保存失败：未返回引用', 'error')
+        return
+      }
+      store.addPendingImage(ref, `${name}（${ref.width}×${ref.height}）`)
+      store.addNotice(`已附加图片 ${name}（${ref.width}×${ref.height}），将随下一条消息发送`)
+    } catch (error) {
+      store.addNotice(`图片校验失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+    }
+  }
+
+  /** Open $EDITOR on a scratch file; the edited text seeds the input box after re-mount. */
+  async function openExternalEditor(): Promise<void> {
+    const editor = process.env.EDITOR ?? process.env.VISUAL ?? 'vi'
+    const scratch = resolve(tmpdir(), `fx-tui-${randomUUID()}.md`)
+    try {
+      writeFileSync(scratch, '', { encoding: 'utf8' })
+    } catch (error) {
+      store.addNotice(`无法创建临时文件：${error instanceof Error ? error.message : String(error)}`, 'error')
+      return
+    }
+    instance?.unmount()
+    try {
+      await instance?.waitUntilExit()
+    } catch { /* unmount already settled */ }
+    store.discardRenderedItems()
+    spawnSync(editor, [scratch], { stdio: 'inherit', env: process.env })
+    let seed: string | undefined
+    try {
+      const text = readFileSync(scratch, 'utf8').replace(/\s+$/, '')
+      seed = text === '' ? undefined : text
+    } catch { /* an unreadable scratch file just seeds nothing */ }
+    try {
+      unlinkSync(scratch)
+    } catch { /* cleanup is best-effort */ }
+    instance = render(
+      createElement(App, { store, history, actions, listCommands, seed }),
+      { exitOnCtrlC: false },
+    )
+    store.start()
+  }
+
   async function shutdown(): Promise<void> {
     instance?.unmount()
     store.dispose()
@@ -230,35 +381,38 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     await exit(0)
   }
 
+  const actions = {
+    onSubmit(text: string): void {
+      debugLog('submit', text)
+      const images = store.consumePendingImages()
+      const content: ContentBlock[] = []
+      if (text !== '') content.push({ type: 'text', text })
+      for (const image of images) content.push({ type: 'image', attachment: image.ref })
+      if (content.length === 0) return
+      history.push(text)
+      const message = createUserMessage({ content, source: { kind: 'user' } })
+      store.echoUser(
+        message.id,
+        text,
+        images.map(image => image.label),
+      )
+      agent.followup(message)
+    },
+    runCommand(line: string): void {
+      void runCommand(line)
+    },
+    onInterrupt(): void {
+      store.setInterrupting()
+      agent.cancel({ kind: 'user' })
+    },
+    onExit(): void {
+      debugLog('exit')
+      void shutdown()
+    },
+  }
+
   instance = render(
-    createElement(App, {
-      store,
-      history,
-      actions: {
-        onSubmit(text: string): void {
-          debugLog('submit', text)
-          if (text === '/forget-approvals' || text === '/forget') {
-            store.addNotice('如需清除审批记忆，请删除 $DSH_HOME/fx-tui-allowlist.json（本会话记忆随进程结束失效）', 'warn')
-            return
-          }
-          history.push(text)
-          const message = createUserMessage({
-            content: [{ type: 'text', text }],
-            source: { kind: 'user' },
-          })
-          store.echoUser(message.id, text)
-          agent.followup(message)
-        },
-        onInterrupt(): void {
-          store.setInterrupting()
-          agent.cancel({ kind: 'user' })
-        },
-        onExit(): void {
-          debugLog('exit')
-          void shutdown()
-        },
-      },
-    }),
+    createElement(App, { store, history, actions, listCommands }),
     { exitOnCtrlC: false },
   )
 
@@ -283,7 +437,7 @@ function createPresenter(ctx: Context): ToolPresenter {
       }
     },
     presentResult(name: string, rawArgs: string, result: {
-      content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[]
+      content: readonly ContentBlock[]
       isError: boolean
       meta: unknown
     }) {

@@ -21,6 +21,13 @@ DeepSeek Harness（dsh）的交互式终端界面 —— 一个树外 bundle 插
 
 - **滚动式聊天界面**：主屏保留终端 scrollback，历史可搜索、可复制
 - **多行输入框**：光标编辑、输入历史（↑/↓）、粘贴通道、CJK 宽度安全
+- **Slash 命令补全菜单**：`/` 弹出菜单（内置 + dsh 命令注册表自动并入：
+  /compact、/feedback、/goal、/permission…），↑↓ 导航、Tab 补全、Enter 执行
+- **@-文件引用**：输入 `@` 弹出工作区文件的 fuzzy 路径补全（零依赖自研评分器，
+  basename 加权），选中后模型自动读取该文件
+- **$EDITOR 长消息**：`/edit` 挂起 TUI → 打开 `$EDITOR` → 编辑内容回填输入框
+- **图片输入**：`/image <路径>` 附加图片（png/jpeg/webp/gif，经 dsh attachment
+  服务持久化），随下一条消息发送（模型能否识图取决于当前路由）
 - **流式 Markdown 渲染**：代码高亮（cli-highlight）、CJK 感知换行
 - **工具调用卡片**（官方呈现层 `presentCall/presentResult`）：命令卡（耗时 + 退出码）、
   文件改动卡（红绿 diff）、搜索卡、读文件卡、web 卡
@@ -55,15 +62,16 @@ dsh --profile fx --resume <id>      # 恢复会话
 
 | 按键 | 功能 |
 |---|---|
-| `Enter` | 发送消息 / 确认选择 / 提交自由文本回答 |
+| `Enter` | 发送消息 / 确认选择 / 提交自由文本回答 / 执行或补全菜单项 |
 | `Ctrl+J` | 输入框内换行 |
-| `↑` / `↓` | 翻阅输入历史（光标在首行/末行时） |
-| `Esc` | 中断当前轮次 / 清空输入 / 跳过问题 |
+| `↑` / `↓` | 翻阅输入历史 / 菜单导航（菜单打开时） |
+| `Tab` | 补全菜单高亮项（命令 / 文件路径） |
+| `Esc` | 中断当前轮次 / 清空输入 / 跳过问题 / 关闭菜单 |
 | `Ctrl+O` | 工具详情 摘要⇄完整 切换 |
 | `Ctrl+C` | 清空输入；空输入时再按一次退出 |
 | `y` `s` `a` `n` | 审批：一次 / 本会话 / 总是（记住）/ 拒绝 |
 | 数字键 | 问题选项选择 |
-| `/help` `/exit` | 内置命令 |
+| `/help` `/edit` `/image <路径>` `/exit` | 内置命令（`/` 查看全部） |
 
 ### 审批记忆
 
@@ -92,10 +100,10 @@ FX_TUI_DEBUG=1 dsh --profile fx   # 事件流写 /tmp/fx-debug.log
 `cordis.patch.yml` 叠加在 `@deepseek-ai/dsh-base` 之上：禁用 HMR、注入 persona、挂载
 `dsh-tool-ask-user`（给模型 ask_user_question 工具）和本包 runner。
 
-## 已知限制（M2 后）
+## 已知限制（M3 后）
 
-- 无 slash 命令补全菜单、@-文件引用、图片粘贴（M3）
 - 无模型切换、会话选择器、todo/plan 渲染（M4）
+- 图片能否被识别取决于当前模型路由（deepseek-v4-flash 为纯文本路由）
 - 主题固定（暂缓）
 - IME 与鼠标细节以真实终端实测为准
 
