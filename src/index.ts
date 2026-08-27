@@ -361,6 +361,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     try {
       unlinkSync(scratch)
     } catch { /* cleanup is best-effort */ }
+    bottomFlush()
     instance = render(
       createElement(App, { store, history, actions, listCommands, seed }),
       { exitOnCtrlC: false },
@@ -368,23 +369,37 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     store.start()
   }
 
-  async function shutdown(): Promise<void> {
-    instance?.unmount()
-    store.dispose()
-    if (agent.status === 'running') {
-      agent.cancel({ kind: 'user' })
-      await Promise.race([
-        agent.whenIdle().catch(() => {}),
-        new Promise(resolve => { setTimeout(resolve, 3000) }),
-      ])
-    }
-    try {
-      await ctx.get('sessions')?.flush(agent.session)
-    } catch {
-      // flushing on exit is best-effort
-    }
-    await exit(0)
+async function shutdown(): Promise<void> {
+  instance?.unmount()
+  store.dispose()
+  if (agent.status === 'running') {
+    agent.cancel({ kind: 'user' })
+    await Promise.race([
+      agent.whenIdle().catch(() => {}),
+      new Promise(resolve => { setTimeout(resolve, 3000) }),
+    ])
   }
+  try {
+    await ctx.get('sessions')?.flush(agent.session)
+  } catch {
+    // flushing on exit is best-effort
+  }
+  await exit(0)
+}
+
+/**
+ * Push the cursor to the bottom of the screen with one blank-screen flush so
+ * the first Ink frame (and therefore the input box) renders at the terminal's
+ * last row, like Claude Code. Later growth scrolls naturally and keeps the
+ * input pinned; a taller viewport is filled from scrollback by the terminal.
+ */
+function bottomFlush(): void {
+  const out = process.stdout
+  const rows = out.rows
+  if (out.isTTY === true && typeof rows === 'number' && rows > 0 && rows < 1000) {
+    out.write('\n'.repeat(rows))
+  }
+}
 
   const actions = {
     onSubmit(text: string): void {
@@ -416,6 +431,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     },
   }
 
+  bottomFlush()
   instance = render(
     createElement(App, { store, history, actions, listCommands }),
     { exitOnCtrlC: false },
