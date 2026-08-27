@@ -65,11 +65,14 @@ export function App(props: AppProps): ReactElement {
         {snap.todos.length > 0 && <TodoPanel todos={snap.todos} width={width} />}
         {snap.queuedMessages.length > 0 && (
           <Box flexDirection="column">
-            {snap.queuedMessages.map((message, index) => (
+            {snap.queuedMessages.slice(0, 5).map((message, index) => (
               <Text key={message.id} color="yellow" dimColor>
                 {`⏳ 已排队${snap.queuedMessages.length > 1 ? `（${index + 1}/${snap.queuedMessages.length}）` : ''}：${truncateLine(message.text, width - 12)}`}
               </Text>
             ))}
+            {snap.queuedMessages.length > 5 && (
+              <Text color="yellow" dimColor>{`…（还有 ${snap.queuedMessages.length - 5} 条排队消息）`}</Text>
+            )}
           </Box>
         )}
         <StatusBar

@@ -50,6 +50,8 @@ DeepSeek Harness（dsh）的交互式终端界面 —— 一个树外 bundle 插
 - **Transcript 模式**：`Ctrl+R` 显示注入的隐藏上下文（plugin 快照、技能目录等）
 - **Plan 审批卡片**：计划模式（`/plan`）下模型经 `exit_plan_mode` 提交的计划渲染为
   品红审批卡——计划 markdown 结构化展示、批准选项 `✓` 标注、Enter 直接批准
+- **运行状态面板**：`/status` 显示版本/模型/会话/上下文/工作区 + 已加载插件树
+- **增量渲染**：Ink `incrementalRendering`（只重绘变更行）降低闪烁，流式输出已回归验证
 - **会话持久化**：dsh session log，`--resume <id>` 启动恢复
 
 ## 安装
@@ -83,7 +85,7 @@ dsh --profile fx --resume <id>      # 恢复会话
 | `Ctrl+C` | 清空输入；空输入时再按一次退出 |
 | `y` `s` `a` `n` | 审批：一次 / 本会话 / 总是（记住）/ 拒绝 |
 | 数字键 | 问题选项选择 |
-| `/help` `/sessions` `/model` `/export` `/edit` `/image <路径>` `/exit` | 内置命令（`/` 查看全部） |
+| `/help` `/status` `/sessions` `/model` `/export` `/edit` `/image <路径>` `/exit` | 内置命令（`/` 查看全部） |
 
 ### 审批记忆
 
@@ -112,11 +114,15 @@ FX_TUI_DEBUG=1 dsh --profile fx   # 事件流写 /tmp/fx-debug.log
 `cordis.patch.yml` 叠加在 `@deepseek-ai/dsh-base` 之上：禁用 HMR、注入 persona、挂载
 `dsh-tool-ask-user`（给模型 ask_user_question 工具）和本包 runner。
 
-## 已知限制（M4 后）
+## 已知限制（M5 后）
 
 - 会话/模型选择器一次最多 9 项（问题组件的数字键上限）
 - 主题固定（暂缓）
-- IME 与鼠标细节以真实终端实测为准
+- **Windows 未实测**：已加防御代码（编辑器 spawn 走 shell、kitty release 事件守卫），
+  但没有 Windows 环境验证；欢迎反馈
+- **IME 以真机为准**：CJK 输入/粘贴/流式渲染已在 pty 全链路回归，但输入法预编辑
+  （macOS 候选窗）需要真实终端确认——推荐 iTerm2/WezTerm/kitty；如遇预编辑异常，
+  可用 `/edit` 外部编辑器作为托底
 
 ## License
 

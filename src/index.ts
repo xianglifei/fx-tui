@@ -51,7 +51,7 @@ import { App } from './ui/App.js'
 import type { MenuEntry } from './ui/Input.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.4.0'
+export const FX_TUI_VERSION = '0.5.0'
 
 /** Stable Cordis plugin name. */
 export const name = 'fx-tui-runner'
@@ -253,6 +253,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
 
   const builtinCommands: readonly MenuEntry[] = [
     { name: 'help', description: '查看按键与命令帮助', kind: 'builtin' },
+    { name: 'status', description: '查看运行状态与插件树', kind: 'builtin' },
     { name: 'sessions', description: '切换到另一个会话', kind: 'builtin' },
     { name: 'model', description: '切换模型 / provider', kind: 'builtin' },
     { name: 'export', description: '导出当前会话为 Markdown', kind: 'builtin' },
@@ -440,6 +441,29 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
         case 'exit': case 'quit': case 'bye':
           await shutdown()
           return
+        case 'status': {
+          const plugins: string[] = []
+          try {
+            ctx.registry.forEach(runtime => {
+              if (runtime.name !== undefined) plugins.push(runtime.name)
+            })
+          } catch { /* registry inspection is display-optional */ }
+          const snapshot = store.getSnapshot()
+          const context = snapshot.contextWindow !== undefined && snapshot.contextWindow > 0
+            ? `${snapshot.contextTokens} / ${snapshot.contextWindow} tokens`
+            : `${snapshot.contextTokens} tokens`
+          const pluginLines = plugins.slice(0, 15).map(name => `· ${name}`)
+          if (plugins.length > 15) pluginLines.push(`…（共 ${plugins.length} 个插件）`)
+          store.addPanel('运行状态', [
+            `fx-tui v${FX_TUI_VERSION} · Node ${process.version} · ${process.platform}/${process.arch}`,
+            `模型：${modelLabel()} · 会话：${agent.id}`,
+            `上下文：${context} · 工作区：${process.cwd()}`,
+            '',
+            `已加载插件（${plugins.length}）：`,
+            ...pluginLines,
+          ])
+          return
+        }
         case 'sessions':
           await listSessionChoices()
           return
@@ -530,7 +554,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
       await instance?.waitUntilExit()
     } catch { /* unmount already settled */ }
     store.discardRenderedItems()
-    spawnSync(editor, [scratch], { stdio: 'inherit', env: process.env })
+    spawnSync(editor, [scratch], { stdio: 'inherit', env: process.env, shell: process.platform === 'win32' })
     let seed: string | undefined
     try {
       const text = readFileSync(scratch, 'utf8').replace(/\s+$/, '')
@@ -542,7 +566,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     bottomFlush()
     instance = render(
       createElement(App, { store, history, actions, listCommands, seed }),
-      { exitOnCtrlC: false },
+      { exitOnCtrlC: false, incrementalRendering: true },
     )
     store.start()
   }
@@ -612,7 +636,7 @@ function bottomFlush(): void {
   bottomFlush()
   instance = render(
     createElement(App, { store, history, actions, listCommands }),
-    { exitOnCtrlC: false },
+    { exitOnCtrlC: false, incrementalRendering: true },
   )
 
   store.start()
