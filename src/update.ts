@@ -24,6 +24,8 @@ export interface UpdateOutcome {
   ok: boolean
   /** True when new commits were applied and a restart would take effect. */
   applied: boolean
+  /** Rebuilt FX_TUI_VERSION when readable; undefined otherwise. */
+  versionAfter?: string
   lines: string[]
 }
 
@@ -212,6 +214,7 @@ export async function performSelfUpdate(options: {
   return {
     ok: true,
     applied: true,
+    ...(rebuilt !== undefined ? { versionAfter: rebuilt } : {}),
     lines: [
       `已应用 ${Number.isNaN(behindCount) ? '?' : behindCount} 个新提交`
       + `${versionLine === '' ? '' : ' · '}${versionLine}。`,

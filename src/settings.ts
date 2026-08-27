@@ -5,8 +5,8 @@
  * Shift+Tab mode cycling is session-scoped on purpose — this file is only
  * touched by `/config`, so a one-off in-session switch never silently changes
  * what future launches start with. A missing or malformed file falls back to
- * `DEFAULT_APPROVAL_MODE` ('auto'): deleting the file is therefore also the
- * documented way to reset settings.
+ * the built-in defaults: deleting the file is therefore also the documented
+ * way to reset settings.
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -16,9 +16,13 @@ import type { ApprovalMode } from './store.js'
 
 export const DEFAULT_APPROVAL_MODE: ApprovalMode = 'auto'
 
+/** Auto-update ships ON: opt-out lives in this file (and /config), not in code. */
+export const DEFAULT_AUTO_UPDATE = true
+
 interface SettingsFile {
   version: 1
   approvalMode: ApprovalMode
+  autoUpdate?: boolean
 }
 
 const FILE_VERSION = 1
@@ -31,16 +35,23 @@ function isApprovalMode(value: unknown): value is ApprovalMode {
 
 export class FxSettings {
   private mode: ApprovalMode
+  private auto: boolean
   private readonly filePath: string
 
   constructor(dshHome: string | undefined) {
     const home = dshHome !== undefined && dshHome !== '' ? dshHome : join(homedir(), '.dsh')
     this.filePath = join(home, 'fx-tui-settings.json')
-    this.mode = loadApprovalMode(this.filePath)
+    const loaded = loadSettings(this.filePath)
+    this.mode = loaded.approvalMode
+    this.auto = loaded.autoUpdate
   }
 
   get approvalMode(): ApprovalMode {
     return this.mode
+  }
+
+  get autoUpdate(): boolean {
+    return this.auto
   }
 
   /** The path surfaced by `/config` so users know where to look / reset. */
@@ -50,9 +61,22 @@ export class FxSettings {
 
   setApprovalMode(mode: ApprovalMode): void {
     this.mode = mode
+    this.save()
+  }
+
+  setAutoUpdate(enabled: boolean): void {
+    this.auto = enabled
+    this.save()
+  }
+
+  private save(): void {
     try {
       mkdirSync(dirname(this.filePath), { recursive: true })
-      const file: SettingsFile = { version: FILE_VERSION, approvalMode: this.mode }
+      const file: SettingsFile = {
+        version: FILE_VERSION,
+        approvalMode: this.mode,
+        ...(this.auto === DEFAULT_AUTO_UPDATE ? {} : { autoUpdate: this.auto }),
+      }
       writeFileSync(this.filePath, `${JSON.stringify(file, null, 2)}\n`, { encoding: 'utf8' })
     } catch {
       // persistence is best-effort; the in-memory default still applies
@@ -60,15 +84,17 @@ export class FxSettings {
   }
 }
 
-function loadApprovalMode(filePath: string): ApprovalMode {
+function loadSettings(filePath: string): { approvalMode: ApprovalMode; autoUpdate: boolean } {
   try {
     const parsed: unknown = JSON.parse(readFileSync(filePath, 'utf8'))
     if (typeof parsed === 'object' && parsed !== null) {
-      const raw = (parsed as SettingsFile).approvalMode
-      if (isApprovalMode(raw)) return raw
+      const raw = parsed as SettingsFile
+      const approvalMode = isApprovalMode(raw.approvalMode) ? raw.approvalMode : DEFAULT_APPROVAL_MODE
+      const autoUpdate = typeof raw.autoUpdate === 'boolean' ? raw.autoUpdate : DEFAULT_AUTO_UPDATE
+      return { approvalMode, autoUpdate }
     }
   } catch {
-    // absent or malformed file starts at the built-in default
+    // absent or malformed file starts at the built-in defaults
   }
-  return DEFAULT_APPROVAL_MODE
+  return { approvalMode: DEFAULT_APPROVAL_MODE, autoUpdate: DEFAULT_AUTO_UPDATE }
 }

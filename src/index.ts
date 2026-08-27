@@ -44,6 +44,7 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-user-questions'
 
 import { ApprovalMemory } from './approval-memory.js'
+import { maybeAutoUpdate } from './auto-update.js'
 import { expandPath, imageMediaTypeOf, tokenizePathList } from './path-drops.js'
 import { FxSettings } from './settings.js'
 import { TuiStore } from './store.js'
@@ -54,7 +55,10 @@ import type { MenuEntry } from './ui/Input.js'
 import { installedRoot, performSelfUpdate } from './update.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.10.1'
+export const FX_TUI_VERSION = '0.11.0'
+
+/** Idle window after launch before the one-shot background update check fires. */
+const AUTO_UPDATE_DELAY_MS = 120_000
 
 /** Stable Cordis plugin name. */
 export const name = 'fx-tui-runner'
@@ -271,7 +275,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     { name: 'status', description: '查看运行状态与插件树', kind: 'builtin' },
     { name: 'sessions', description: '切换到另一个会话', kind: 'builtin' },
     { name: 'model', description: '切换模型 / provider', kind: 'builtin' },
-    { name: 'config', description: '查看 / 修改设置（启动默认权限模式）', kind: 'builtin' },
+    { name: 'config', description: '查看 / 修改设置（权限模式、自动更新）', kind: 'builtin' },
     { name: 'export', description: '导出当前会话为 Markdown', kind: 'builtin' },
     { name: 'edit', description: '用 $EDITOR 编写长消息', kind: 'builtin' },
     { name: 'image', description: '附加图片：<路径>… 或直接拖入终端；空参查看明细', kind: 'builtin' },
@@ -389,31 +393,67 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     '自动允许': 'auto', 自动: 'auto',
     '每次询问': 'ask', 询问: 'ask',
   }
+  const AUTO_WORDS: Record<string, boolean> = {
+    on: true, off: false,
+    开启: true, 开: true, 打开: true,
+    关闭: false, 关: false,
+  }
 
   /** `/config`: interactive picker for the persisted startup defaults, or a
-   * direct one-shot form (`/config permission auto|ask`). Changing the default
-   * also flips the current session so both views stay consistent — unlike
-   * Shift+Tab, which never touches the file. */
+   * direct one-shot form (`/config permission auto|ask`,
+   * `/config autoupdate on|off`). Changing a default also flips the current
+   * session so both views stay consistent — unlike Shift+Tab, which never
+   * touches the file. */
   async function runConfig(arg: string): Promise<void> {
     const tokens = arg.split(/\s+/).filter(token => token !== '')
     if (tokens.length > 0) {
       const [key, value] = tokens
-      const target = key === 'permission' && value !== undefined ? DIRECT_MODE_WORDS[value.toLowerCase()] : undefined
-      if (target === undefined) {
-        store.addNotice('用法：/config（交互选择）或 /config permission <auto|ask>', 'warn')
+      const modeTarget = key === 'permission' && value !== undefined ? DIRECT_MODE_WORDS[value.toLowerCase()] : undefined
+      if (modeTarget !== undefined) {
+        applyApprovalMode(modeTarget)
         return
       }
-      applyApprovalMode(target)
+      const autoRaw = key === 'autoupdate' && value !== undefined ? value.toLowerCase() : undefined
+      if (autoRaw !== undefined) {
+        const autoTarget = AUTO_WORDS[autoRaw]
+        if (autoTarget === undefined) {
+          store.addNotice('用法：/config autoupdate <on|off>', 'warn')
+          return
+        }
+        applyAutoUpdate(autoTarget)
+        return
+      }
+      store.addNotice('用法：/config（交互选择）· /config permission <auto|ask> · /config autoupdate <on|off>', 'warn')
       return
     }
-    const current = settings.approvalMode
-    const chosen = await pick(`设置启动默认权限模式（当前 ${modeLabel(current)}）`, [
+    const modeChosen = await pick(`设置启动默认权限模式（当前 ${modeLabel(settings.approvalMode)}）`, [
       { label: '自动允许', description: '工具调用不再逐个询问；之后每次启动默认开启' },
       { label: '每次询问', description: '工具调用逐个请求批准；之后每次启动默认关闭' },
     ])
-    const target = DIRECT_MODE_WORDS[chosen ?? '']
-    if (target === undefined) return
-    applyApprovalMode(target)
+    const modeTarget = DIRECT_MODE_WORDS[modeChosen ?? '']
+    if (modeTarget !== undefined) applyApprovalMode(modeTarget)
+    const autoChosen = await pick(`后台自动更新（当前 ${settings.autoUpdate ? '开启' : '关闭'}）`, [
+      { label: '开启', description: '启动约两分钟后静默拉取新版本并重建；每 24 小时最多联网一次，重启 fx 生效' },
+      { label: '关闭', description: '仅在手动运行 /update 时联网' },
+    ])
+    if (autoChosen !== undefined) {
+      const autoTarget = AUTO_WORDS[autoChosen]
+      if (autoTarget !== undefined) applyAutoUpdate(autoTarget)
+    }
+  }
+
+  function applyAutoUpdate(target: boolean): void {
+    const changed = settings.autoUpdate !== target
+    settings.setAutoUpdate(target)
+    const state = target ? '开启' : '关闭'
+    if (!changed) {
+      store.addNotice(`自动更新已是${state}（${settings.location}）`)
+      return
+    }
+    store.addNotice(
+      `自动更新已保存为${state}` + (target ? '：启动约两分钟后后台检查，每 24 小时最多联网一次，更新落盘后重启 fx 生效' : '')
+      + `（${settings.location}）`,
+    )
   }
 
   function applyApprovalMode(target: ApprovalMode): void {
@@ -832,6 +872,22 @@ function bottomFlush(): void {
   )
 
   store.start()
+
+  // Background self-update, deep enough into the session that startup imports
+  // have settled; .unref() keeps the pending timer from delaying process exit.
+  setTimeout(() => {
+    void maybeAutoUpdate(
+      {
+        dshHome: process.env.DSH_HOME,
+        isAutoEnabled: () => settings.autoUpdate,
+        isBusy: () => updating,
+        setBusy: () => { updating = true },
+        releaseBusy: () => { updating = false },
+        notify: text => store.addNotice(text),
+      },
+      { currentVersion: FX_TUI_VERSION },
+    ).catch(() => { /* background pass is strictly best-effort */ })
+  }, AUTO_UPDATE_DELAY_MS).unref()
 
   ctx.effect(() => () => {
     store.dispose()
