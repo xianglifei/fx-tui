@@ -596,12 +596,16 @@ export class TuiStore {
     this.commit()
   }
 
-  /** Confirm the option selection for the active question. */
-  confirmQuestion(): void {
+  /** Confirm the option selection for the active question; a default label
+   * (plan-review's approve option) applies when nothing is selected. */
+  confirmQuestion(defaultLabel?: string): void {
     const active = this.questionActive
     if (active === null) return
-    if (active.selected.length === 0) return
-    this.questionAnswers.push({ id: active.item.id, selected: [...active.selected] })
+    const selected = active.selected.length > 0
+      ? [...active.selected]
+      : defaultLabel !== undefined ? [defaultLabel] : []
+    if (selected.length === 0) return
+    this.questionAnswers.push({ id: active.item.id, selected })
     this.advanceQuestion()
   }
 

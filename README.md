@@ -48,6 +48,8 @@ DeepSeek Harness（dsh）的交互式终端界面 —— 一个树外 bundle 插
 - **TODO 面板**：`todo_write` 的任务列表实时渲染（◐ 进行中 / ☐ 待办 / ☑ 完成）
 - **subagent 徽标**：子 agent 运行时状态栏显示 `🌱×N`
 - **Transcript 模式**：`Ctrl+R` 显示注入的隐藏上下文（plugin 快照、技能目录等）
+- **Plan 审批卡片**：计划模式（`/plan`）下模型经 `exit_plan_mode` 提交的计划渲染为
+  品红审批卡——计划 markdown 结构化展示、批准选项 `✓` 标注、Enter 直接批准
 - **会话持久化**：dsh session log，`--resume <id>` 启动恢复
 
 ## 安装
@@ -112,7 +114,6 @@ FX_TUI_DEBUG=1 dsh --profile fx   # 事件流写 /tmp/fx-debug.log
 
 ## 已知限制（M4 后）
 
-- plan 模式的专用渲染未做（plan-mode 通过提示词工作，/permission 可切换权限）
 - 会话/模型选择器一次最多 9 项（问题组件的数字键上限）
 - 主题固定（暂缓）
 - IME 与鼠标细节以真实终端实测为准

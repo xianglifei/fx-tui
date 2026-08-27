@@ -306,10 +306,14 @@ function ApprovalView(props: { store: TuiStore; prompt: ApprovalPrompt }): React
 function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width: number }): ReactElement {
   const { store, question } = props
   const item = question.item
+  const intent = item.intent
+  const isPlanReview = intent?.kind === 'plan-review'
+  const approveLabel = isPlanReview ? intent.approve : undefined
   useInput((input, key) => {
     if (key.eventType === 'release') return
     if (key.return) {
-      store.confirmQuestion()
+      // A plan review confirms the approve option when nothing is selected.
+      store.confirmQuestion(approveLabel)
       return
     }
     if (key.escape) {
@@ -324,28 +328,51 @@ function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width:
     }
   })
   const options = item.options ?? []
+  const planLines = isPlanReview && item.detail !== undefined
+    ? renderMarkdownLines(item.detail, Math.max(24, props.width - 4))
+    : []
+  const shownPlan = planLines.slice(0, 30)
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="blue" paddingX={1}>
-      <Text color="blue" bold>
-        {`问 题${question.total > 1 ? `（${question.index}/${question.total}）` : ''}：${item.question}`}
+    <Box flexDirection="column" borderStyle="round" borderColor={isPlanReview ? 'magenta' : 'blue'} paddingX={1}>
+      <Text color={isPlanReview ? 'magenta' : 'blue'} bold>
+        {isPlanReview
+          ? `计划审批：${item.question}`
+          : `问 题${question.total > 1 ? `（${question.index}/${question.total}）` : ''}：${item.question}`}
       </Text>
       {item.header !== undefined && item.header !== '' && <Text dimColor>{item.header}</Text>}
-      {item.detail !== undefined && item.detail !== '' && (
+      {isPlanReview && shownPlan.length > 0 && (
+        <Box flexDirection="column" marginTop={0} marginBottom={0}>
+          {shownPlan.map((line, i) => (
+            <Text key={i}>{line === '' ? ' ' : line}</Text>
+          ))}
+          {planLines.length > shownPlan.length && (
+            <Text dimColor>{`…（计划共 ${planLines.length} 行，已截断显示）`}</Text>
+          )}
+        </Box>
+      )}
+      {!isPlanReview && item.detail !== undefined && item.detail !== '' && (
         <Text dimColor>{truncateLine(item.detail, props.width - 4)}</Text>
       )}
       {options.map((option, index) => {
         const selected = question.selected.includes(option.label)
+        const isApprove = approveLabel !== undefined && option.label === approveLabel
         return (
-          <Text key={option.label} color={selected ? 'blue' : undefined} bold={selected}>
-            {`[${index + 1}]${selected ? ' ● ' : ' ○ '}${option.label}` +
+          <Text
+            key={option.label}
+            color={isApprove ? 'green' : selected ? 'blue' : undefined}
+            bold={selected || isApprove}
+          >
+            {`[${index + 1}]${selected ? ' ● ' : ' ○ '}${isApprove ? '✓ ' : ''}${option.label}` +
               (option.description !== undefined ? ` — ${option.description}` : '')}
           </Text>
         )
       })}
       <Text dimColor>
-        {item.multiSelect === true
-          ? '数字键多选 · Enter 确认 · Esc 跳过'
-          : '数字键选择 · Enter 确认 · Esc 跳过'}
+        {isPlanReview
+          ? 'Enter 批准 · 数字键选择其他选项 · Esc 跳过'
+          : item.multiSelect === true
+            ? '数字键多选 · Enter 确认 · Esc 跳过'
+            : '数字键选择 · Enter 确认 · Esc 跳过'}
       </Text>
     </Box>
   )
