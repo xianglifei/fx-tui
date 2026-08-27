@@ -52,7 +52,7 @@ import { App } from './ui/App.js'
 import type { MenuEntry } from './ui/Input.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.6.1'
+export const FX_TUI_VERSION = '0.7.0'
 
 /** Stable Cordis plugin name. */
 export const name = 'fx-tui-runner'
@@ -69,7 +69,7 @@ const USAGE = `fx-tui v${FX_TUI_VERSION} — DeepSeek Harness 的交互式终端
   -h, --help             显示帮助
   -v, --version          显示版本
 
-按键：Enter 发送 · Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全 · Esc 中断 · Ctrl+O 工具详情 · Ctrl+C 清空/双击退出
+按键：Enter 发送 · Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全 · Shift+Tab 权限模式 · Esc 中断 · Ctrl+O 工具详情 · Ctrl+C 清空/双击退出
 `
 
 const IMAGE_MEDIA_TYPES: Record<string, ImageMediaType> = {
@@ -229,6 +229,8 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
 
   ctx.on('approval/request', async (req, next) => {
     if (req.agent.id !== agent.id) return next()
+    // Auto mode (Shift+Tab) answers every ask without prompting.
+    if (store.getSnapshot().approvalMode === 'auto') return 'allowed-once'
     debugLog('approval-request', { toolName: req.toolName, reason: req.reason })
     const pending = store.pendingToolFor(req.callId)
     const key = ApprovalMemory.key(req.toolName, pending?.args ?? '')
@@ -447,11 +449,12 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
           store.addPanel('fx-tui 按键与命令', [
             'Enter 发送消息 · Ctrl+J 或 Opt+Enter 换行 · ↑↓ 输入历史/菜单导航',
             'Tab 补全菜单高亮项（/ 命令、@ 文件路径） · Esc 中断轮次/清空/关闭菜单/跳过',
-            'Ctrl+O 工具详情 摘要⇄完整 · Ctrl+C 清空输入（空输入双击退出）',
+            'Shift+Tab 切换权限模式（每次询问 ⇄ 自动允许） · Ctrl+O 工具详情 摘要⇄完整',
+            'Ctrl+C 清空输入（空输入双击退出）',
             '',
             '内置命令：/help 帮助 · /edit 用 $EDITOR 写长消息 · /image <路径> 附加图片 · /exit 退出',
             'dsh 命令（来自注册表）：/compact 压缩历史 · /goal 长任务目标 ·',
-            '  /permission 切换权限模式 · /feedback 反馈（输入 / 查看全部）',
+            '  /feedback 反馈（输入 / 查看全部）',
           ])
           return
         case 'exit': case 'quit': case 'bye':
@@ -473,6 +476,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
           store.addPanel('运行状态', [
             `fx-tui v${FX_TUI_VERSION} · Node ${process.version} · ${process.platform}/${process.arch}`,
             `模型：${modelLabel()} · 会话：${agent.id}`,
+            `权限模式：${snapshot.approvalMode === 'auto' ? '自动允许（shift+tab 切换）' : '每次询问（shift+tab 切换）'}`,
             `上下文：${context} · 工作区：${process.cwd()}`,
             '',
             `已加载插件（${plugins.length}）：`,
@@ -606,10 +610,28 @@ async function shutdown(): Promise<void> {
 }
 
 /**
- * Push the cursor to the bottom of the screen with one blank-screen flush so
- * the first Ink frame (and therefore the input box) renders at the terminal's
- * last row, like Claude Code. Later growth scrolls naturally and keeps the
- * input pinned; a taller viewport is filled from scrollback by the terminal.
+ * Park the cursor at the viewport's home position so the first Ink frame
+ * renders top-down OVER the startup screen and lands with the input box on
+ * the terminal's bottom row, like Claude Code. The frame is exactly one row
+ * shorter than the viewport (the filler reserves it), so writing it never
+ * scrolls: newline padding here would push a full page of blank rows into
+ * the scrollback buffer, leaving an empty screenful above the banner when
+ * the user scrolls their mouse wheel up. Scrolling up instead reveals the
+ * pre-launch shell history (nothing at all in a fresh tab).
+ */
+function homeCursor(): void {
+  const out = process.stdout
+  if (out.isTTY === true) {
+    out.write('\x1b[H')
+  }
+}
+
+/**
+ * Scroll the current on-screen content into the scrollback buffer before a
+ * re-mount (external editor): the visible transcript above the input exists
+ * only in the viewport — it has never scrolled — so a plain repaint would
+ * erase it from view. Deliberately uses newline padding; the blank rows it
+ * adds below are repainted by the next mount.
  */
 function bottomFlush(): void {
   const out = process.stdout
@@ -649,7 +671,7 @@ function bottomFlush(): void {
     },
   }
 
-  bottomFlush()
+  homeCursor()
   instance = render(
     createElement(App, { store, history, actions, listCommands }),
     { exitOnCtrlC: false, incrementalRendering: true },

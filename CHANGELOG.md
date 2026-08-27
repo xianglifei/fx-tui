@@ -3,6 +3,45 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.7.0] - 2026-08-27
+
+### 权限模式（Claude Code 式）
+
+- **Shift+Tab 循环切换** `每次询问 ⇄ 自动允许`：输入框正下方常驻模式提示行
+  （询问态灰字 `权限模式：每次询问（shift+tab 切换自动允许）`，自动态黄字
+  `⏵⏵ 自动允许模式已开启`）。自动模式下 `approval/request` 直接放行、不再弹审批卡，
+  会话级生效（每次启动回到"每次询问"），切换时在会话留一条通知便于审计；
+  allowlist 记忆两种模式下照常生效
+- `/help`、`fx --help`、`/status` 同步收录 Shift+Tab；并修正失实文案——帮助里
+  原写 `/permission 切换权限模式`，但安装的 dsh 包并无该命令，模式切换即 Shift+Tab
+
+### 修复：状态栏与横幅信息重复
+
+- 状态栏右侧不再显示模型名与会话 id（与顶部横幅完全重复），只保留横幅没有的
+  动态信息：`上下文水位 · token 用量`
+
+### 修复：模式切换/新消息导致输入框逐行上移
+
+- 弹性填充区的高度估算从"每项固定 +1 的保守偏置"改为**精确计算**：新模块
+  `ui/ink-text.ts` 用 Ink 同款换行参数（`wrap-ansi {trim:false, hard:true}`）
+  在视图实际换行宽度上算行数。此前每条通知实际渲染 1 行却按 2 行扣减预算，
+  整帧随之每次矮 1 行——切 6 次模式输入框上移 6 行、底部多出 6 条空行
+- 同类隐患一并修掉：用户消息按换行后行数计、工具卡片按视图真实截断/封顶计数
+  （此前把未截断的完整输出全算进去）、审批卡/问题卡（含计划 30 行截断）逐项定高、
+  输入框长行按换行后行数上报（粘贴超长行不再挤动布局）
+- 回归实测：切 5 次模式（5 条通知）与发普通 + 超宽消息后，整帧行数 39 恒定不变
+
+### 修复：启动后鼠标上滑出现整页空白
+
+- 启动光标定位从"写入一整屏换行符下推"改为**光标归位（`\x1b[H`）+ 首帧自顶向下
+  覆写**：首帧恰比视口矮一行（预留行），写入全程零滚动，不再把一页空白推进
+  scrollback——鼠标上滑直接看到启动前的 shell 历史（新标签页则无内容可翻，
+  Claude Code 式）。会话增长后的自然滚动不受影响
+- `/edit` 外部编辑器路径保留换行下推：把屏幕上可见的会话推入 scrollback 保存，
+  编辑器退出后不丢
+- 实测（pty + 终端模拟器）：启动零溢出滚动、scrollback 0 行、横幅第 1 行、
+  模式行第 39 行，八项断言全通过
+
 ## [0.6.1] - 2026-08-27
 
 ### 修复：横幅视口填充改为弹性空白
@@ -123,6 +162,9 @@
   双击 Ctrl+C 退出、`/help` `/exit` 内置命令
 - 端到端验证于 dsh 0.1.1-rc.2：真实模型回路、工具执行、中断、恢复
 
+[0.7.0]: https://github.com/xianglifei/fx-tui/releases/tag/v0.7.0
+[0.6.1]: https://github.com/xianglifei/fx-tui/releases/tag/v0.6.1
+[0.6.0]: https://github.com/xianglifei/fx-tui/releases/tag/v0.6.0
 [0.5.1]: https://github.com/xianglifei/fx-tui/releases/tag/v0.5.1
 [0.5.0]: https://github.com/xianglifei/fx-tui/releases/tag/v0.5.0
 [0.4.0]: https://github.com/xianglifei/fx-tui/releases/tag/v0.4.0

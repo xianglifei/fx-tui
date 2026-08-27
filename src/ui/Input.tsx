@@ -11,9 +11,10 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { Box, Text, useInput, usePaste } from 'ink'
+import { Box, Text, useInput, usePaste, useStdout } from 'ink'
 import type { TuiStore } from '../store.js'
 import { fuzzyMatchPaths, listWorkspaceFiles } from '../workspace-files.js'
+import { textRows } from './ink-text.js'
 
 export interface MenuEntry {
   readonly name: string
@@ -71,15 +72,22 @@ export function InputBox(props: InputBoxProps): ReactElement {
   const reportedHeightRef = useRef(-1)
 
   const isEmpty = ed.lines.length === 1 && ed.lines[0] === ''
+  const { stdout } = useStdout()
+  const termColumns = Math.max(24, stdout?.columns !== undefined && stdout.columns > 0 ? stdout.columns : 80)
 
-  // Report the rendered row count (borders + editor lines + hints + menu) so
-  // App's splash filler can absorb height changes without scrolling. Must be
-  // the exact rendered height: the first frame's scroll budget depends on it.
+  // Report the rendered row count (borders + wrapped editor lines + hints +
+  // menu) so App's splash filler can absorb height changes without scrolling.
+  // Must be the exact rendered height: the first frame's scroll budget depends
+  // on it. Long editor lines wrap inside the border box at its inner width
+  // (columns − 4), so the wrapped row count — not the line count — is what
+  // occupies rows.
   useLayoutEffect(() => {
     const menuOpen = menu !== null && menu.entries.length > 0
-    const h = 2 + Math.max(1, ed.lines.length) +
-      (pendingImageCount > 0 ? 1 : 0) +
-      (questionFreeText && isEmpty && histIdx === -1 ? 1 : 0) +
+    const inner = Math.max(8, termColumns - 4)
+    const editorRows = ed.lines.reduce((n, line) => n + textRows(line === '' ? ' ' : line, inner), 0)
+    const h = 2 + editorRows +
+      (pendingImageCount > 0 ? textRows(`📎 已附加 ${pendingImageCount} 张图片，将随下一条消息发送`, inner) : 0) +
+      (questionFreeText && isEmpty && histIdx === -1 ? textRows('输入你的回答，Enter 提交（Esc 跳过）…', inner) : 0) +
       (menuOpen ? MENU_SLOTS + 3 : 0)
     if (h !== reportedHeightRef.current) {
       reportedHeightRef.current = h
@@ -143,6 +151,14 @@ export function InputBox(props: InputBoxProps): ReactElement {
     // Kitty-protocol terminals report key release as a separate event; without
     // this guard every keypress would fire the handler twice.
     if (key.eventType === 'release') return
+
+    // Shift+Tab cycles the approval mode (每次询问 ⇄ 自动允许). Distinct from
+    // the menu's plain Tab "accept completion", so it also works while a
+    // completion menu is open.
+    if (key.tab && key.shift) {
+      store.cycleApprovalMode()
+      return
+    }
 
     if (key.ctrl && input === 'c') {
       if (!isEmpty) {

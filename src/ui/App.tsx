@@ -10,6 +10,7 @@ import type { ReactElement } from 'react'
 import { Box, Static, Text, useInput, useStdout } from 'ink'
 import type {
   ActiveQuestion,
+  ApprovalMode,
   ApprovalPrompt,
   FinalItem,
   PendingTool,
@@ -24,6 +25,7 @@ import { renderMarkdownLines } from '../markdown.js'
 import { BANNER_BOX_HEIGHT, WelcomeBanner } from './Banner.js'
 import { InputBox } from './Input.js'
 import { StatusBar } from './StatusBar.js'
+import { textRows } from './ink-text.js'
 
 export interface AppActions {
   onSubmit(text: string): void
@@ -46,10 +48,11 @@ export function App(props: AppProps): ReactElement {
   const { stdout } = useStdout()
   const columns = stdout?.columns
   const rows = stdout?.rows
-  const width = Math.max(24, (columns !== undefined && columns > 0 ? columns : 80) - 2)
+  const termColumns = Math.max(24, columns !== undefined && columns > 0 ? columns : 80)
+  const width = Math.max(24, termColumns - 2)
   // The banner spans the terminal's full width — the same width the input box
   // stretches to in the dynamic region — so the top and bottom borders align.
-  const bannerWidth = Math.max(24, columns !== undefined && columns > 0 ? columns : 80)
+  const bannerWidth = termColumns
   const frozen = snap.approval !== null || (snap.question !== null && !snap.questionFreeText)
 
   // Matches InputBox's reported height for an empty single-line editor, so
@@ -65,7 +68,7 @@ export function App(props: AppProps): ReactElement {
   // scrollback line by line. Sizing errs on the small side: a short filler
   // only leaves a harmless gap above the status bar, while an oversized one
   // would push the frame top into the static region and erase transcript rows.
-  const filler = computeFiller(snap as Snapshot, width, rows, inputHeight)
+  const filler = computeFiller(snap as Snapshot, width, termColumns, rows, inputHeight)
 
   return (
     <Box flexDirection="column">
@@ -111,8 +114,6 @@ export function App(props: AppProps): ReactElement {
           detail={snap.phaseDetail}
           usage={snap.usage}
           reasoningChars={snap.reasoningChars}
-          model={snap.model}
-          sessionId={snap.sessionId}
           contextTokens={snap.contextTokens}
           contextWindow={snap.contextWindow}
           childAgents={snap.childAgents}
@@ -131,6 +132,7 @@ export function App(props: AppProps): ReactElement {
           onExit={props.actions.onExit}
           onHeightChange={setInputHeight}
         />
+        <ModeLine mode={snap.approvalMode} />
         {snap.exitArmed && <Text color="red">再按一次 Ctrl+C 退出 fx-tui</Text>}
       </Box>
     </Box>
@@ -444,6 +446,14 @@ function TodoPanel(props: { todos: readonly { content: string; status: 'pending'
   )
 }
 
+/** The permission-mode hint under the input box, Claude-Code style: the
+ * current stance is always visible and the Shift+Tab cycle is advertised. */
+function ModeLine(props: { mode: ApprovalMode }): ReactElement {
+  return props.mode === 'auto'
+    ? <Text color="yellow">⏵⏵ 自动允许模式已开启（shift+tab 切换）</Text>
+    : <Text dimColor>权限模式：每次询问（shift+tab 切换自动允许）</Text>
+}
+
 function StreamView(props: { text: string; width: number }): ReactElement {
   const lines = renderMarkdownLines(props.text, props.width)
   return (
@@ -465,54 +475,120 @@ function formatElapsed(ms: number): string {
 //
 // The filler must absorb every layout change without letting the live frame's
 // top edge cross into the Static region (which would erase transcript rows),
-// so heights are estimated with an upward bias: an overestimate only leaves a
-// cosmetic gap above the status bar, never data loss.
+// so item heights are estimated EXACTLY: each estimator replicates Ink's own
+// wrap (wrap-ansi, {trim:false, hard:true}) at the same width the view wraps
+// at. A systematic overestimate would creep the input box up one row per
+// transcript item; an underestimate would push the frame top into the Static
+// region and erase transcript rows.
 
-/** Upper-bound row count of `text` after terminal wrapping at `width`. */
-function wrappedLines(text: string, width: number): number {
-  if (text === '') return 1
-  let cells = 0
-  for (const ch of Array.from(text)) cells += charWidth(ch)
-  return Math.max(1, Math.ceil(cells / Math.max(8, width)) + 1)
-}
-
-/** Estimated rendered rows of one settled transcript item (≥ actual). */
-function estimateItemHeight(item: FinalItem, width: number): number {
+/** Estimated rendered rows of one settled transcript item (== actual).
+ * `width` is the markdown wrap width (terminal columns − 2); plain Texts wrap
+ * at the full `columns`, boxed cards at `columns − 4` (borders + paddingX). */
+function estimateItemHeight(item: FinalItem, width: number, columns: number): number {
   switch (item.kind) {
     case 'banner':
       return BANNER_BOX_HEIGHT
     case 'user':
-      return item.text.split('\n').reduce((n, line) => n + wrappedLines(line, width), 0) +
+      return item.text.split('\n').reduce((n, line) => n + textRows(`❯ ${line}`, columns), 0) +
         (item.images?.length ?? 0)
     case 'assistant':
-      // Exact: the same renderer the view uses.
+      // Exact: the same renderer the view uses; its lines fit within `width`.
       return renderMarkdownLines(item.text, width).length + (item.interrupted ? 1 : 0)
     case 'notice':
-      return wrappedLines(item.text, width)
+      return textRows(`${item.tone === 'error' ? '✗' : item.tone === 'warn' ? '⚠' : '·'} ${item.text}`, columns)
     case 'panel':
-      return 3 + wrappedLines(item.title, width) +
-        item.lines.reduce((n, line) => n + wrappedLines(line, width), 0)
+      return 2 + textRows(item.title, columns - 4) +
+        item.lines.reduce((n, line) => n + textRows(line, columns - 4), 0)
     case 'tool':
-      // Result lines are shown capped, but counting them uncapped keeps the
-      // estimate safely above the real card height.
-      return 3 + wrappedLines(item.title, width) + item.result.split('\n').length + 1
+      return estimateToolCardHeight(item, width, columns)
   }
 }
 
-/** Estimated rows of the question/approval card (≥ actual). */
-function estimateQuestionHeight(question: ActiveQuestion, width: number): number {
+/** Rows of a settled tool card, mirroring ToolCardView's caps and truncation.
+ * Shown lines are pre-truncated by the view to `width − 4` cells, so each
+ * renders exactly one row and only their count matters. */
+function estimateToolCardHeight(item: ToolItem, width: number, columns: number): number {
+  const inner = Math.max(8, columns - 4)
+  const view = item.view
+  const title = `${item.ok ? '✓' : '✗'} ${view?.title ?? item.title}`
+  const elapsed = formatElapsed(item.elapsedMs)
+  /** Rows of a capped line list plus the view's "…还有 N 行" overflow notice. */
+  const cappedRows = (count: number, cap: number): number =>
+    Math.min(count, cap) + (count > cap ? 1 : 0)
+
+  if (view !== undefined && view.card === 'diff') {
+    const lines = renderFileDiffs(view.diffs)
+    const shown = item.verbose ? lines : lines.slice(0, 24)
+    const rows = shown.reduce((n, line) => n + textRows(line === '' ? ' ' : line, inner), 0)
+    return 2 + textRows(`${title} · ${elapsed}`, inner) + rows +
+      (lines.length > shown.length ? 1 : 0)
+  }
+  if (view !== undefined && view.card === 'terminal') {
+    const output = view.output ?? item.result
+    return 2 + textRows(`${title} · ${elapsed}`, inner) +
+      cappedRows(output.split('\n').length, item.verbose ? 400 : 12)
+  }
+  if (view !== undefined && view.card === 'search') {
+    const summary = view.shape === 'matches'
+      ? `${view.files.length} 个文件 · ${view.total} 处匹配${view.truncated ? '（已截断）' : ''}`
+      : `${view.paths.length} 个路径${view.truncated ? ` / 共 ${view.total}（已截断）` : ''}`
+    const extra = view.shape === 'paths' ? cappedRows(view.paths.length, item.verbose ? 200 : 8) : 0
+    return 2 + textRows(`${title} · ${summary} · ${elapsed}`, inner) + extra
+  }
+  if (view !== undefined && view.card === 'read') {
+    const header = `· 行 ${view.offset}–${view.offset + view.lines.length - 1} / ${view.totalLines} · ${elapsed}`
+    return 2 + textRows(`${title} ${header}`, inner)
+  }
+  if (view !== undefined && view.card === 'web') {
+    const summary = view.kind === 'search'
+      ? `${view.sources.length} 个来源${view.truncated ? '（已截断）' : ''}`
+      : `HTTP ${view.statusCode}${view.truncated ? '（内容已截断）' : ''}`
+    const sourceRows = view.kind === 'search' ? Math.min(view.sources.length, 5) : 0
+    return 2 + textRows(`${title} · ${summary} · ${elapsed}`, inner) + sourceRows
+  }
+  // Generic / fallback card: title + args preview + capped result lines.
+  const args = formatToolArgs(item.args, Math.max(16, width - 10))
+  return 2 + textRows(`${title} ${args} · ${elapsed}`, inner) +
+    cappedRows(item.result.split('\n').length, item.verbose ? 400 : 12)
+}
+
+/** Estimated rows of the question/approval card (== actual). */
+function estimateQuestionHeight(question: ActiveQuestion, width: number, columns: number): number {
   const item = question.item
-  let h = 4 // borders + title + hint row
-  if (item.header !== undefined && item.header !== '') h += 1
+  const inner = Math.max(8, columns - 4)
+  const intent = item.intent
+  const isPlanReview = intent?.kind === 'plan-review'
+  const approveLabel = isPlanReview ? intent.approve : undefined
+  const title = isPlanReview
+    ? `计划审批：${item.question}`
+    : `问 题${question.total > 1 ? `（${question.index}/${question.total}）` : ''}：${item.question}`
+  let h = 2 + textRows(title, inner)
+  if (item.header !== undefined && item.header !== '') h += textRows(item.header, inner)
   if (item.detail !== undefined && item.detail !== '') {
-    if (item.intent?.kind === 'plan-review') {
-      h += renderMarkdownLines(item.detail, Math.max(24, width - 4)).length + 1
+    if (isPlanReview) {
+      const planLines = renderMarkdownLines(item.detail, Math.max(24, width - 4))
+      h += Math.min(planLines.length, 30) + (planLines.length > 30 ? 1 : 0)
     } else {
-      h += wrappedLines(item.detail, width - 4)
+      h += 1 // the view truncates the detail to a single line
     }
   }
-  h += (item.options ?? []).length
-  return h
+  const options = item.options ?? []
+  options.forEach((option, index) => {
+    const isApprove = approveLabel !== undefined && option.label === approveLabel
+    const row = `[${index + 1}] ● ${isApprove ? '✓ ' : ''}${option.label}` +
+      (option.description !== undefined ? ` — ${option.description}` : '')
+    h += textRows(row, inner)
+  })
+  return h + 1 // hint row
+}
+
+/** Estimated rows of the approval prompt (== actual). */
+function estimateApprovalHeight(prompt: ApprovalPrompt, columns: number): number {
+  const inner = Math.max(8, columns - 4)
+  let h = 2 + textRows(`需要批准：${prompt.toolName}`, inner)
+  if (prompt.command !== undefined && prompt.command !== '') h += textRows(`  ${prompt.command}`, inner)
+  if (prompt.reason !== '') h += textRows(prompt.reason, inner)
+  return h + 1 // choice row
 }
 
 /**
@@ -522,6 +598,7 @@ function estimateQuestionHeight(question: ActiveQuestion, width: number): number
 function computeFiller(
   snap: Snapshot,
   width: number,
+  columns: number,
   rows: number | undefined,
   inputHeight: number,
 ): number {
@@ -542,26 +619,21 @@ function computeFiller(
       settled += cached
       continue
     }
-    const h = estimateItemHeight(item, width)
+    const h = estimateItemHeight(item, width, columns)
     cache.map.set(item, h)
     settled += h
   }
 
-  const questionHeight = snap.question !== null
-    ? estimateQuestionHeight(snap.question, width)
-    : 0
-  const streamingHeight = snap.streaming !== ''
-    ? renderMarkdownLines(snap.streaming, width).length
-    : 0
   const live =
-    streamingHeight +
+    (snap.streaming !== '' ? renderMarkdownLines(snap.streaming, width).length : 0) +
     snap.pendingTools.length +
-    (snap.approval !== null ? 5 : 0) +
-    questionHeight +
+    (snap.approval !== null ? estimateApprovalHeight(snap.approval, columns) : 0) +
+    (snap.question !== null ? estimateQuestionHeight(snap.question, width, columns) : 0) +
     (snap.todos.length > 0 ? 3 + Math.min(8, snap.todos.length) + (snap.todos.length > 8 ? 1 : 0) : 0) +
     (snap.queuedMessages.length > 0 ? Math.min(5, snap.queuedMessages.length) + (snap.queuedMessages.length > 5 ? 1 : 0) : 0) +
     (snap.exitArmed ? 1 : 0) +
     1 + // status bar
+    1 + // permission-mode line under the input
     inputHeight +
     1 // trailing-newline budget: the first frame scrolls exactly its row count,
     // so one reserved row keeps the banner's top border on screen

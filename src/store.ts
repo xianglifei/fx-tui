@@ -90,6 +90,13 @@ export interface QueuedMessage {
 
 export type Phase = 'idle' | 'thinking' | 'streaming' | 'tool'
 
+/**
+ * Tool-approval stance, cycled with Shift+Tab:
+ * 'ask' prompts for every approval request (allowlist memory still applies),
+ * 'auto' allows every request without prompting.
+ */
+export type ApprovalMode = 'ask' | 'auto'
+
 export interface Snapshot {
   readonly version: number
   readonly items: readonly FinalItem[]
@@ -113,6 +120,7 @@ export interface Snapshot {
   readonly exitArmed: boolean
   readonly sessionId: string
   readonly model: string
+  readonly approvalMode: ApprovalMode
 }
 
 /** Bridge to the tools registry's presentation layer; optional. */
@@ -157,6 +165,7 @@ export class TuiStore {
   private exitTimer: ReturnType<typeof setTimeout> | null = null
   private echoedId: string | null = null
   private replaying = false
+  private approvalMode: ApprovalMode = 'ask'
   private lastBanner: Omit<BannerItem, 'kind'> | null = null
   private snapshot!: Snapshot
   private readonly listeners = new Set<() => void>()
@@ -208,6 +217,7 @@ export class TuiStore {
       exitArmed: this.exitArmed,
       sessionId: this.sessionId,
       model: this.model,
+      approvalMode: this.approvalMode,
     }
   }
 
@@ -549,6 +559,16 @@ export class TuiStore {
       ? '工具详情已切换为完整显示（影响之后完成的卡片）'
       : '工具详情已切换为摘要显示（影响之后完成的卡片）')
     return this.verboseToolDetail
+  }
+
+  /** Cycle the approval stance（每次询问 ⇄ 自动允许）and announce the switch;
+   * returns the new mode. */
+  cycleApprovalMode(): ApprovalMode {
+    this.approvalMode = this.approvalMode === 'ask' ? 'auto' : 'ask'
+    this.addNotice(this.approvalMode === 'auto'
+      ? '自动允许模式已开启：工具调用不再逐个询问（shift+tab 切回）'
+      : '已切回每次询问模式：工具调用将逐个请求批准')
+    return this.approvalMode
   }
 
   /** Context pressure from the token meter; window comes from request/context events. */

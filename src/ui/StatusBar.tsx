@@ -1,7 +1,9 @@
 /**
- * The live status line: spinner + phase on the left, model/usage/session on
- * the right. The left side degrades (reasoning suffix, then detail) before it
- * is allowed to wrap, so the line never breaks the layout.
+ * The live status line: spinner + phase on the left, context/usage on the
+ * right. Model and session id live only in the welcome banner — repeating
+ * them here would duplicate it. The left side degrades (reasoning suffix,
+ * then detail) before it is allowed to wrap, so the line never breaks the
+ * layout.
  */
 
 import { useEffect, useState } from 'react'
@@ -17,8 +19,6 @@ export interface StatusBarProps {
   detail: string
   usage: string
   reasoningChars: number
-  model: string
-  sessionId: string
   contextTokens: number
   contextWindow?: number
   childAgents: number
@@ -46,13 +46,11 @@ export function StatusBar(props: StatusBarProps): ReactElement {
         : '就绪'
 
   const context = contextText(props.contextTokens, props.contextWindow)
-  // Right side degrades from lowest priority (session id, usage) so the
-  // model name and context level survive narrow terminals.
+  // Usage degrades before the context level so the water level survives
+  // narrow terminals.
   const parts: Array<{ text: string; priority: number }> = [
-    { text: props.model, priority: 4 },
-    { text: context, priority: 3 },
-    { text: props.usage, priority: 2 },
-    { text: props.sessionId.slice(0, 13), priority: 1 },
+    { text: context, priority: 2 },
+    { text: props.usage, priority: 1 },
   ]
   const kept = parts.map(p => p.text)
   const fits = (): boolean => stringWidth(kept.filter(t => t !== '').join(' · ')) <= width - 10
