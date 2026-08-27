@@ -62,13 +62,14 @@ DeepSeek Harness（dsh）的交互式终端界面 —— 一个树外 bundle 插
 git clone <this-repo> && cd fx-tui
 pnpm install && pnpm run build
 dsh plugin --profile fx add "$(pwd)"
+sudo cp bin/fx /opt/homebrew/bin/fx   # 或任意 PATH 目录；之后 fx 直接启动
 ```
 
 ## 使用
 
 ```sh
-dsh --profile fx                    # 新会话
-dsh --profile fx --resume <id>      # 恢复会话
+fx                                  # 新会话（等价于 dsh --profile fx）
+fx --resume <id>                    # 恢复会话
 ```
 
 ### 按键

@@ -61,7 +61,7 @@ export const inject = ['agentDefaultModel', 'agents', 'sessions', 'userQuestions
 
 const USAGE = `fx-tui v${FX_TUI_VERSION} — DeepSeek Harness 的交互式终端界面
 
-用法：dsh --profile fx [选项]
+用法：fx [选项]（即 dsh --profile fx）
 
 选项：
   --resume <sessionId>   恢复一个已持久化的会话

@@ -442,12 +442,8 @@ export function InputBox(props: InputBoxProps): ReactElement {
         </Box>
       )}
       <Box flexDirection="column" borderStyle="round" borderColor={frozen ? 'gray' : 'cyan'} paddingX={1}>
-        {isEmpty && histIdx === -1 && (
-          <Text dimColor>
-            {questionFreeText
-              ? '输入你的回答，Enter 提交（Esc 跳过）…'
-              : '说点什么…（Enter 发送 · / 命令 · @ 文件 · /help 查看按键）'}
-          </Text>
+        {isEmpty && histIdx === -1 && questionFreeText && (
+          <Text dimColor>输入你的回答，Enter 提交（Esc 跳过）…</Text>
         )}
         {pendingImageCount > 0 && (
           <Text color="magenta">{`📎 已附加 ${pendingImageCount} 张图片，将随下一条消息发送`}</Text>

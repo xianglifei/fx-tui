@@ -1,0 +1,4 @@
+#!/bin/sh
+# fx — launch fx-tui, the interactive terminal surface for DeepSeek Harness.
+# All arguments pass through, e.g. `fx --resume <sessionId>`.
+exec dsh --profile fx "$@"
