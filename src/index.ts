@@ -54,7 +54,7 @@ import type { MenuEntry } from './ui/Input.js'
 import { installedRoot, performSelfUpdate } from './update.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.10.0'
+export const FX_TUI_VERSION = '0.10.1'
 
 /** Stable Cordis plugin name. */
 export const name = 'fx-tui-runner'
@@ -758,6 +758,22 @@ function homeCursor(): void {
 }
 
 /**
+ * Wipe the visible viewport before the first frame mounts. Re-launching over
+ * a previous run's leftovers — dead command menus, input boxes, status bars
+ * Ink never erases on unmount — otherwise paints the new frame on top of
+ * them: Ink only redraws its own regions and cannot see residue in the main
+ * buffer. ESC[2J clears the viewport alone (never ESC[3J) so the scrollback
+ * buffer keeps pre-launch shell history and earlier conversations reachable
+ * by scrolling up — the same contract homeCursor()'s startup screen assumes.
+ */
+function wipeViewport(): void {
+  const out = process.stdout
+  if (out.isTTY === true) {
+    out.write('\x1b[2J')
+  }
+}
+
+/**
  * Scroll the current on-screen content into the scrollback buffer before a
  * re-mount (external editor): the visible transcript above the input exists
  * only in the viewport — it has never scrolled — so a plain repaint would
@@ -808,6 +824,7 @@ function bottomFlush(): void {
     },
   }
 
+  wipeViewport()
   homeCursor()
   instance = render(
     createElement(App, { store, history, actions, listCommands }),
