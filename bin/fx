@@ -1,4 +1,21 @@
 #!/bin/sh
 # fx — launch fx-tui, the interactive terminal surface for DeepSeek Harness.
 # All arguments pass through, e.g. `fx --resume <sessionId>`.
+
+# Fool-proofing: actionable errors instead of a bare "command not found".
+if ! command -v dsh >/dev/null 2>&1; then
+  echo "fx: 未找到 dsh 命令（DeepSeek Harness CLI）。请先安装：" >&2
+  echo "    npm install -g @deepseek-ai/dsh" >&2
+  echo "    （需要 Node.js >= 22.19；详见 https://github.com/deepseek-ai/deepseek-harness）" >&2
+  exit 1
+fi
+
+DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
+if [ ! -d "$DSH_HOME/profiles/fx" ]; then
+  echo "fx: 尚未安装 fx-tui 的 fx profile。请在 fx-tui 仓库目录执行：" >&2
+  echo "    dsh plugin --profile fx add \"\$(pwd)\"" >&2
+  echo "    （安装说明见 https://github.com/xianglifei/fx-tui）" >&2
+  exit 1
+fi
+
 exec dsh --profile fx "$@"
