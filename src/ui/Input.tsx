@@ -210,6 +210,10 @@ export function InputBox(props: InputBoxProps): ReactElement {
       store.toggleVerboseToolDetail()
       return
     }
+    if (key.ctrl && input === 'r') {
+      store.toggleVerboseTranscript()
+      return
+    }
 
     if (key.upArrow) {
       if (ed.row > 0) {

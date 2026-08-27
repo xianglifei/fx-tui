@@ -21,6 +21,7 @@ export interface StatusBarProps {
   sessionId: string
   contextTokens: number
   contextWindow?: number
+  childAgents: number
 }
 
 export function StatusBar(props: StatusBarProps): ReactElement {
@@ -73,6 +74,7 @@ export function StatusBar(props: StatusBarProps): ReactElement {
   const budget = Math.max(12, width - stringWidth(right) - 4)
 
   let left = ` ${label}`
+  if (props.childAgents > 0) left += ` · 🌱×${props.childAgents}`
   const withDetail = props.detail !== '' ? `${left} · ${props.detail}` : left
   const withReasoning = props.phase === 'thinking' && props.reasoningChars > 0
     ? `${withDetail} · 已思考 ${formatCount(props.reasoningChars)} 字`

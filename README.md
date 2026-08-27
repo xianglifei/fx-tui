@@ -39,7 +39,16 @@ DeepSeek Harness（dsh）的交互式终端界面 —— 一个树外 bundle 插
 - **上下文水位**：状态栏实时显示 `上下文 N%·已用/容量`（token-meter）
 - **状态栏**：spinner + 阶段 + 思考字数 + token 用量（窄终端自动降级）
 - **中断与退出**：Esc 中断当前轮次，双击 Ctrl+C 退出
-- **会话持久化**：`--resume <id>` 恢复历史会话（dsh session log）
+- **会话管理**：`/sessions` 弹出选择器**活体切换**会话（时间/目录/运行中标记），
+  `--resume <id>` 启动恢复，`/export` 导出为 Markdown 时间线
+- **模型切换**：`/model` 选择器热切换（下一步请求生效）并持久化为默认；
+  `/permission` 切换权限模式（dsh 注册表命令）
+- **排队输入**：agent 忙碌时提交的消息显示 `⏳ 已排队`，轮次结束自动消费；
+  中断时丢弃并提示
+- **TODO 面板**：`todo_write` 的任务列表实时渲染（◐ 进行中 / ☐ 待办 / ☑ 完成）
+- **subagent 徽标**：子 agent 运行时状态栏显示 `🌱×N`
+- **Transcript 模式**：`Ctrl+R` 显示注入的隐藏上下文（plugin 快照、技能目录等）
+- **会话持久化**：dsh session log，`--resume <id>` 启动恢复
 
 ## 安装
 
@@ -68,10 +77,11 @@ dsh --profile fx --resume <id>      # 恢复会话
 | `Tab` | 补全菜单高亮项（命令 / 文件路径） |
 | `Esc` | 中断当前轮次 / 清空输入 / 跳过问题 / 关闭菜单 |
 | `Ctrl+O` | 工具详情 摘要⇄完整 切换 |
+| `Ctrl+R` | Transcript 模式（显示注入的上下文） |
 | `Ctrl+C` | 清空输入；空输入时再按一次退出 |
 | `y` `s` `a` `n` | 审批：一次 / 本会话 / 总是（记住）/ 拒绝 |
 | 数字键 | 问题选项选择 |
-| `/help` `/edit` `/image <路径>` `/exit` | 内置命令（`/` 查看全部） |
+| `/help` `/sessions` `/model` `/export` `/edit` `/image <路径>` `/exit` | 内置命令（`/` 查看全部） |
 
 ### 审批记忆
 
@@ -100,10 +110,10 @@ FX_TUI_DEBUG=1 dsh --profile fx   # 事件流写 /tmp/fx-debug.log
 `cordis.patch.yml` 叠加在 `@deepseek-ai/dsh-base` 之上：禁用 HMR、注入 persona、挂载
 `dsh-tool-ask-user`（给模型 ask_user_question 工具）和本包 runner。
 
-## 已知限制（M3 后）
+## 已知限制（M4 后）
 
-- 无模型切换、会话选择器、todo/plan 渲染（M4）
-- 图片能否被识别取决于当前模型路由（deepseek-v4-flash 为纯文本路由）
+- plan 模式的专用渲染未做（plan-mode 通过提示词工作，/permission 可切换权限）
+- 会话/模型选择器一次最多 9 项（问题组件的数字键上限）
 - 主题固定（暂缓）
 - IME 与鼠标细节以真实终端实测为准
 

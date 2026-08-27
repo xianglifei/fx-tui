@@ -14,7 +14,7 @@
 
 import type { ContentBlock, TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, TodoItem } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswer, AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
 
@@ -70,6 +70,13 @@ export interface PendingImage {
   readonly label: string
 }
 
+/** A message submitted while the agent was busy; delivered when the turn claims it. */
+export interface QueuedMessage {
+  readonly id: string
+  readonly text: string
+  readonly images: readonly string[]
+}
+
 export type Phase = 'idle' | 'thinking' | 'streaming' | 'tool'
 
 export interface Snapshot {
@@ -77,6 +84,10 @@ export interface Snapshot {
   readonly items: readonly FinalItem[]
   readonly pendingTools: readonly PendingTool[]
   readonly pendingImages: readonly PendingImage[]
+  readonly queuedMessages: readonly QueuedMessage[]
+  readonly todos: readonly TodoItem[]
+  readonly childAgents: number
+  readonly verboseTranscript: boolean
   readonly streaming: string
   readonly phase: Phase
   readonly phaseDetail: string
@@ -111,6 +122,10 @@ export class TuiStore {
   private items: FinalItem[] = []
   private pendingTools = new Map<string, PendingTool>()
   private pendingImages: PendingImage[] = []
+  private queuedMessages: QueuedMessage[] = []
+  private todos: TodoItem[] = []
+  private childAgentCount = 0
+  private verboseTranscript = false
   private streamBuf = ''
   private streamText = ''
   private phase: Phase = 'idle'
@@ -136,12 +151,17 @@ export class TuiStore {
   private flushTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(
-    readonly sessionId: string,
-    readonly model: string,
+    sessionId: string,
+    model: string,
     private readonly presenter?: ToolPresenter,
   ) {
+    this.sessionId = sessionId
+    this.model = model
     this.rebuild()
   }
+
+  private sessionId: string
+  private model: string
 
   // -- React external-store plumbing -------------------------------------
 
@@ -158,6 +178,10 @@ export class TuiStore {
       items: [...this.items],
       pendingTools: [...this.pendingTools.values()],
       pendingImages: [...this.pendingImages],
+      queuedMessages: [...this.queuedMessages],
+      todos: [...this.todos],
+      childAgents: this.childAgentCount,
+      verboseTranscript: this.verboseTranscript,
       streaming: this.streamText,
       phase: this.phase,
       phaseDetail: this.phaseDetail,
@@ -217,11 +241,31 @@ export class TuiStore {
       }
       case 'user/message': {
         const message = ev.data
-        if (message.source.kind !== 'user') break
-        if (this.echoedId !== null && message.id === this.echoedId) {
-          this.echoedId = null
+        if (message.source.kind !== 'user') {
+          if (this.verboseTranscript && !this.replaying) {
+            this.items.push({
+              kind: 'notice',
+              tone: 'info',
+              text: `注入上下文（${message.source.kind}）：${truncate(blocksToText(message.content), 80)}`,
+            })
+          }
           break
         }
+        const isEcho = this.echoedId !== null && message.id === this.echoedId
+        if (isEcho) this.echoedId = null
+        // A queued echo's matching session event promotes it to the transcript.
+        const queuedIndex = this.queuedMessages.findIndex(q => q.id === message.id)
+        if (queuedIndex >= 0) {
+          const queued = this.queuedMessages[queuedIndex]!
+          this.queuedMessages.splice(queuedIndex, 1)
+          this.items.push({
+            kind: 'user',
+            text: queued.text,
+            ...(queued.images.length > 0 ? { images: queued.images } : {}),
+          })
+          break
+        }
+        if (isEcho) break // idle-time echo already rendered
         this.items.push({ kind: 'user', text: blocksToText(message.content) })
         break
       }
@@ -297,11 +341,24 @@ export class TuiStore {
         if (ev.data.contextWindow !== undefined) this.contextWindow = ev.data.contextWindow
         break
       }
+      case 'todo/write': {
+        this.todos = [...ev.data.todos]
+        break
+      }
       case 'turn/end': {
         this.finalizeStream(ev.data.reason.kind === 'aborted')
         this.phase = 'idle'
         this.phaseDetail = ''
         this.reasoningChars = 0
+        if (ev.data.reason.kind === 'aborted' && this.queuedMessages.length > 0) {
+          // A user cancel clears queued inbox work; reflect the drop.
+          this.items.push({
+            kind: 'notice',
+            tone: 'warn',
+            text: `已丢弃排队中的 ${this.queuedMessages.length} 条消息（轮次被中断）`,
+          })
+          this.queuedMessages = []
+        }
         const reason = ev.data.reason
         if (reason.kind === 'error') {
           this.items.push({ kind: 'notice', tone: 'error', text: `错误：${reason.error.message}` })
@@ -355,13 +412,58 @@ export class TuiStore {
 
   // -- Local actions -------------------------------------------------------
 
-  /** Echo a submitted message immediately; the matching session event is deduped by id. */
+  /** Echo a submitted message: immediately as a transcript item when idle, or
+   * as a queued indicator when the agent is busy (promoted on its session event). */
   echoUser(id: string, text: string, images?: readonly string[]): void {
     this.echoedId = id
-    this.items.push({ kind: 'user', text, ...(images !== undefined && images.length > 0 ? { images } : {}) })
-    this.phase = 'thinking'
-    this.phaseDetail = ''
+    if (this.phase !== 'idle') {
+      this.queuedMessages.push({ id, text, images: images ?? [] })
+    } else {
+      this.items.push({ kind: 'user', text, ...(images !== undefined && images.length > 0 ? { images } : {}) })
+      this.phase = 'thinking'
+      this.phaseDetail = ''
+    }
     this.commit()
+  }
+
+  /** Reset for a live switch to another persisted session. */
+  reset(sessionId: string, model: string, events: readonly SessionEvent[]): void {
+    this.sessionId = sessionId
+    this.model = model
+    this.items = []
+    this.pendingTools.clear()
+    this.pendingImages = []
+    this.queuedMessages = []
+    this.todos = []
+    this.childAgentCount = 0
+    this.streamBuf = ''
+    this.streamText = ''
+    this.phase = 'idle'
+    this.phaseDetail = ''
+    this.usage = ''
+    this.reasoningChars = 0
+    this.echoedId = null
+    this.replay(events)
+    this.finishReplay()
+  }
+
+  /** Update the status-bar model label (after a /model switch). */
+  setModel(model: string): void {
+    this.model = model
+    this.commit()
+  }
+
+  setChildAgentCount(count: number): void {
+    this.childAgentCount = count
+    this.commit()
+  }
+
+  toggleVerboseTranscript(): boolean {
+    this.verboseTranscript = !this.verboseTranscript
+    this.addNotice(this.verboseTranscript
+      ? 'Transcript 模式已开启：显示注入的上下文消息'
+      : 'Transcript 模式已关闭')
+    return this.verboseTranscript
   }
 
   /** Queue an image to ride along with the next submitted message. */
@@ -570,6 +672,8 @@ function blocksToText(content: readonly ContentBlock[]): string {
   return text
 }
 
+export { blocksToText as blocksToTextOf }
+
 function resultBlocks(message: ToolResultMessage): readonly ContentBlock[] {
   const blocks: ContentBlock[] = []
   for (const block of message.content as readonly ContentBlock[]) {
@@ -586,6 +690,8 @@ function toolResultCallId(message: ToolResultMessage): string | undefined {
   return undefined
 }
 
+export { toolResultCallId as toolResultCallIdOf }
+
 function toolResultText(message: ToolResultMessage, error: { name: string; code: string } | undefined): string {
   const parts: string[] = []
   for (const block of message.content as readonly ContentBlock[]) {
@@ -600,6 +706,8 @@ function toolResultText(message: ToolResultMessage, error: { name: string; code:
   if (parts.length === 0 && error !== undefined) parts.push(`${error.name}: ${error.code}`)
   return truncate(parts.join('\n'), RESULT_PREVIEW_LIMIT)
 }
+
+export { toolResultText as toolResultTextOf }
 
 function truncate(text: string, limit: number): string {
   if (text.length <= limit) return text

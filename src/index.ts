@@ -37,6 +37,7 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
@@ -45,18 +46,18 @@ import type {} from '@deepseek-ai/dsh-user-questions'
 import { ApprovalMemory } from './approval-memory.js'
 import { TuiStore } from './store.js'
 import type { ToolPresenter } from './store.js'
-import { formatToolArgs } from './store.js'
+import { blocksToTextOf, formatToolArgs, toolResultCallIdOf, toolResultTextOf } from './store.js'
 import { App } from './ui/App.js'
 import type { MenuEntry } from './ui/Input.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.3.0'
+export const FX_TUI_VERSION = '0.4.0'
 
 /** Stable Cordis plugin name. */
 export const name = 'fx-tui-runner'
 
 /** Core services required before the TUI can drive an agent. */
-export const inject = ['agentDefaultModel', 'agents', 'sessions', 'userQuestions', 'attachments', 'commands']
+export const inject = ['agentDefaultModel', 'agents', 'sessions', 'userQuestions', 'attachments', 'commands', 'llm', 'sessionQuery']
 
 const USAGE = `fx-tui v${FX_TUI_VERSION} — DeepSeek Harness 的交互式终端界面
 
@@ -147,34 +148,52 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
   const defaultModel = ctx.get('agentDefaultModel')
   // Early process shutdown can dispose the tree while we are starting up.
   if (agents === undefined || defaultModel === undefined) return
+  const registry = agents
+  const defaultModelService = defaultModel
 
-  const selection = defaultModel.currentSelection()
+  const selection = defaultModelService.currentSelection()
+  // The live selection ref: mutating `current` switches the model from the next step.
+  let selectionRef: ModelSelectionRef = { current: selection, assembled: undefined }
   const agentOptions = { provider: selection.provider, model: selection.model }
   const setup = (agentCtx: Context): void => {
-    const selected: ModelSelectionRef = { current: selection, assembled: undefined }
-    installModelSelection(agentCtx, selected)
+    selectionRef = { current: selectionRef.current ?? selection, assembled: undefined }
+    installModelSelection(agentCtx, selectionRef)
   }
 
-  const handle = options.resume !== undefined
-    ? await agents.resume({ resumeSessionId: SessionId(options.resume), agentOptions, setup })
-    : await agents.create({
+  let handle = options.resume !== undefined
+    ? await registry.resume({ resumeSessionId: SessionId(options.resume), agentOptions, setup })
+    : await registry.create({
         sessionId: SessionId(`session-${randomUUID()}`),
         meta: { cwd: process.cwd() },
         agentOptions,
         setup,
       })
-  const agent: Agent = handle.agent
+  let agent: Agent = handle.agent
 
-  const model = `${agent.options.provider ?? selection.provider}/${agent.options.model ?? selection.model}`
+  const modelLabel = (): string =>
+    `${agent.options.provider ?? selectionRef.current?.provider ?? ''}/${agent.options.model ?? selectionRef.current?.model ?? ''}`
   const presenter = createPresenter(ctx)
-  const store = new TuiStore(agent.id, model, presenter)
+  const store = new TuiStore(agent.id, modelLabel(), presenter)
   const memory = new ApprovalMemory(process.env.DSH_HOME)
   store.addNotice(
-    `fx-tui v${FX_TUI_VERSION} · ${model} · 会话 ${agent.id}` +
+    `fx-tui v${FX_TUI_VERSION} · ${modelLabel()} · 会话 ${agent.id}` +
     (options.resume !== undefined ? ' · 已恢复历史会话' : ''),
   )
   store.replay(agent.session.events)
   store.finishReplay()
+
+  // Live subagent tracking: children created against this session show a badge.
+  const childAgents = new Set<string>()
+  const syncChildCount = (): void => { store.setChildAgentCount(childAgents.size) }
+  ctx.on('agent/created', payload => {
+    if (payload.agent.session.header.parentSession === agent.session.id) {
+      childAgents.add(payload.agent.id)
+      syncChildCount()
+    }
+  })
+  ctx.on('agent/disposed', payload => {
+    if (childAgents.delete(payload.agent.id)) syncChildCount()
+  })
 
   ctx.on('session/event', (session, event) => {
     if (session.id !== agent.session.id) return
@@ -234,10 +253,160 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
 
   const builtinCommands: readonly MenuEntry[] = [
     { name: 'help', description: '查看按键与命令帮助', kind: 'builtin' },
+    { name: 'sessions', description: '切换到另一个会话', kind: 'builtin' },
+    { name: 'model', description: '切换模型 / provider', kind: 'builtin' },
+    { name: 'export', description: '导出当前会话为 Markdown', kind: 'builtin' },
     { name: 'edit', description: '用 $EDITOR 编写长消息', kind: 'builtin' },
     { name: 'image', description: '附加图片：<路径>，随下一条消息发送', kind: 'builtin' },
     { name: 'exit', description: '退出 fx-tui', kind: 'builtin' },
   ]
+
+  /** Interactive single-choice picker reusing the question UI; resolves undefined when skipped. */
+  async function pick(title: string, options: readonly { label: string; description?: string }[]): Promise<string | undefined> {
+    if (options.length === 0) return undefined
+    const answer = await store.askQuestions([{
+      id: `fx-tui-pick-${Date.now()}`,
+      question: title,
+      options: options.slice(0, 9).map(option => ({
+        label: option.label,
+        ...(option.description !== undefined ? { description: option.description } : {}),
+      })),
+    }])
+    return answer.answers[0]?.selected[0]
+  }
+
+  async function switchSession(sessionId: string): Promise<void> {
+    if (agent.session.id === sessionId) {
+      store.addNotice('已在当前会话中')
+      return
+    }
+    if (agent.status === 'running') {
+      store.addNotice('当前任务运行中：先等它完成或按 Esc 中断，再切换会话', 'warn')
+      return
+    }
+    try {
+      await ctx.get('sessions')?.flush(agent.session)
+    } catch { /* best-effort durability before switching */ }
+    try {
+      await handle.dispose()
+      handle = await registry.resume({ resumeSessionId: SessionId(sessionId), agentOptions: agent.options, setup })
+      agent = handle.agent
+      childAgents.clear()
+      syncChildCount()
+      store.reset(agent.id, modelLabel(), agent.session.events)
+      store.addNotice(`已切换到会话 ${agent.id}`)
+    } catch (error) {
+      store.addNotice(`切换会话失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+    }
+  }
+
+  async function listSessionChoices(): Promise<void> {
+    let records
+    try {
+      records = await ctx.sessionQuery.listSessions()
+    } catch (error) {
+      store.addNotice(`读取会话列表失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+      return
+    }
+    const choices = records
+      .filter(record => !record.header.parentSession && record.header.origin !== 'subagent')
+      .slice(0, 9)
+      .map(record => {
+        const created = new Date(record.header.createdAt)
+        const stamp = `${created.getMonth() + 1}-${created.getDate()} ${String(created.getHours()).padStart(2, '0')}:${String(created.getMinutes()).padStart(2, '0')}`
+        const dir = record.header.cwd !== undefined ? basename(record.header.cwd) : '?'
+        return {
+          label: `${stamp} · ${dir}${record.live ? ' · 运行中' : ''}`,
+          description: record.header.id.slice(0, 21),
+          id: record.header.id,
+        }
+      })
+    if (choices.length === 0) {
+      store.addNotice('没有可切换的会话')
+      return
+    }
+    const chosen = await pick('选择要切换到的会话', choices)
+    const target = choices.find(choice => choice.label === chosen)
+    if (target === undefined) return
+    await switchSession(target.id)
+  }
+
+  async function listModelChoices(): Promise<void> {
+    const providers = ctx.llm.listProviders()
+    if (providers.length === 0) {
+      store.addNotice('没有已注册的模型 provider')
+      return
+    }
+    const options: { label: string; description?: string }[] = []
+    for (const provider of providers) {
+      let models: readonly { id: string }[] = []
+      try {
+        models = await ctx.llm.listModels(provider.id)
+      } catch { /* provider without a listing stays absent */ }
+      for (const model of models) {
+        options.push({ label: `${provider.id}/${model.id}` })
+      }
+    }
+    if (options.length === 0) {
+      store.addNotice('没有可列举的模型')
+      return
+    }
+    const chosen = await pick(`切换模型（当前 ${modelLabel()}）`, options)
+    if (chosen === undefined) return
+    const [provider, ...rest] = chosen.split('/')
+    const model = rest.join('/')
+    if (provider === undefined || model === '') return
+    selectionRef.current = { provider, model }
+    store.setModel(`${provider}/${model}`)
+    store.addNotice(`模型已切换为 ${provider}/${model}（下一步请求生效）`)
+    try {
+      await defaultModelService.saveSelection({ provider, model })
+    } catch { /* persisting the default is best-effort */ }
+  }
+
+  async function exportSession(): Promise<void> {
+    const lines: string[] = [
+      `# fx-tui 会话导出 · ${agent.id}`,
+      '',
+      `- 模型：${modelLabel()}`,
+      `- 导出时间：${new Date().toLocaleString('zh-CN')}`,
+      '',
+      '---',
+      '',
+    ]
+    const pendingNames = new Map<string, string>()
+    for (const event of agent.session.events) {
+      if (event.type === 'tool/call') {
+        try {
+          const parsed = JSON.parse(event.data.arguments) as Record<string, unknown>
+          const summary = typeof parsed.command === 'string' ? parsed.command
+            : typeof parsed.path === 'string' ? parsed.path : ''
+          pendingNames.set(event.data.callId, `${event.data.name}${summary !== '' ? `（${summary}）` : ''}`)
+        } catch {
+          pendingNames.set(event.data.callId, event.data.name)
+        }
+      } else if (event.type === 'tool/result') {
+        const callId = toolResultCallIdOf(event.data.message)
+        const name = callId !== undefined ? pendingNames.get(callId) : undefined
+        if (callId !== undefined) pendingNames.delete(callId)
+        lines.push(`> 🔧 **工具** ${name ?? '(unknown)'}：${toolResultTextOf(event.data.message, undefined).split('\n')[0] ?? ''}`, '')
+      } else if (event.type === 'user/message') {
+        if (event.data.source.kind === 'user') {
+          lines.push(`## 👤 用户`, '', blocksToTextOf(event.data.content), '')
+        }
+      } else if (event.type === 'assistant/message') {
+        const text = blocksToTextOf(event.data.message.content)
+        if (text !== '') lines.push(`## 🤖 助手`, '', text, '')
+      }
+    }
+    const file = resolve(process.cwd(), `fx-tui-export-${agent.id.slice(0, 13)}.md`)
+    try {
+      writeFileSync(file, lines.join('\n'), { encoding: 'utf8' })
+      store.addPanel('会话已导出', [file])
+    } catch (error) {
+      store.addNotice(`导出失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+    }
+  }
 
   function listCommands(): readonly MenuEntry[] {
     const dsh: MenuEntry[] = []
@@ -270,6 +439,15 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
           return
         case 'exit': case 'quit': case 'bye':
           await shutdown()
+          return
+        case 'sessions':
+          await listSessionChoices()
+          return
+        case 'model':
+          await listModelChoices()
+          return
+        case 'export':
+          await exportSession()
           return
         case 'edit':
           await openExternalEditor()

@@ -62,6 +62,16 @@ export function App(props: AppProps): ReactElement {
         {snap.question !== null && snap.questionFreeText && (
           <FreeTextQuestionView question={snap.question} />
         )}
+        {snap.todos.length > 0 && <TodoPanel todos={snap.todos} width={width} />}
+        {snap.queuedMessages.length > 0 && (
+          <Box flexDirection="column">
+            {snap.queuedMessages.map((message, index) => (
+              <Text key={message.id} color="yellow" dimColor>
+                {`⏳ 已排队${snap.queuedMessages.length > 1 ? `（${index + 1}/${snap.queuedMessages.length}）` : ''}：${truncateLine(message.text, width - 12)}`}
+              </Text>
+            ))}
+          </Box>
+        )}
         <StatusBar
           phase={snap.phase}
           detail={snap.phaseDetail}
@@ -71,6 +81,7 @@ export function App(props: AppProps): ReactElement {
           sessionId={snap.sessionId}
           contextTokens={snap.contextTokens}
           contextWindow={snap.contextWindow}
+          childAgents={snap.childAgents}
         />
         <InputBox
           store={props.store}
@@ -347,6 +358,24 @@ function FreeTextQuestionView(props: { question: ActiveQuestion }): ReactElement
       <Text color="blue" bold>{`问 题：${item.question}`}</Text>
       {item.detail !== undefined && item.detail !== '' && <Text dimColor>{item.detail}</Text>}
       <Text dimColor>在下方输入框中输入回答，Enter 提交</Text>
+    </Box>
+  )
+}
+
+function TodoPanel(props: { todos: readonly { content: string; status: 'pending' | 'in_progress' | 'completed' }[]; width: number }): ReactElement {
+  const shown = props.todos.slice(0, 8)
+  const done = props.todos.filter(todo => todo.status === 'completed').length
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
+      <Text color="yellow" bold>{`📋 任务 ${done}/${props.todos.length}`}</Text>
+      {shown.map((todo, index) => (
+        <Text key={index} color={todo.status === 'in_progress' ? 'yellow' : undefined} dimColor={todo.status === 'completed'}>
+          {`${todo.status === 'completed' ? '☑' : todo.status === 'in_progress' ? '◐' : '☐'} ${truncateLine(todo.content, props.width - 8)}`}
+        </Text>
+      ))}
+      {props.todos.length > shown.length && (
+        <Text dimColor>{`…（还有 ${props.todos.length - shown.length} 项）`}</Text>
+      )}
     </Box>
   )
 }
