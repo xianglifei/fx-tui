@@ -66,9 +66,15 @@ fx --resume <id>                    # 恢复会话
 - **状态栏**：阶段 spinner + 思考字数 + token 用量 + **上下文水位**
   （`上下文 N%·已用/容量`，token-meter 驱动）+ 窄终端自动降级
 - **增量渲染**：Ink `incrementalRendering` 只重绘变更行，降低闪烁
-- **双主题自动适配**：启动时经 OSC 11 探测终端背景色，深色终端自动换用为黑
-  底调校的 hex 配色（浅色终端保持原有观感）；`/theme`（自动检测 / 浅色 /
-  深色，支持中文别名）手动固定并持久化，切换即全量重绘整个转录
+- **主题系统 + 背景色自动检测**：启动时经 OSC 11 探测终端背景色，深色终端自动
+  换用为黑底调校的 hex 配色（浅色终端保持原有观感）；`/theme` 交互选择或直给
+  主题名（如 `/theme catppuccin-mocha`，显示名与中文别名均可），除内置
+  浅色/深色外收录 **14 款 Ghostty 社区热门主题**——深色 10 款（Catppuccin
+  Mocha、TokyoNight Night、Gruvbox Dark、Rose Pine Moon、Dracula、Kanagawa
+  Wave、Nord、Ayu、Everforest、Solarized Dark HC）+ 浅色 4 款（Catppuccin
+  Latte、Gruvbox Light、Rose Pine Dawn、TokyoNight Day），按公开 dotfiles
+  使用量选定，色值自 Ghostty 官方主题文件原样移植；每款主题按其目标底色调校
+  对比度（菜单中标注 深/浅），选择持久化，切换即全量重绘整个转录
 
 ### 工具可见性
 

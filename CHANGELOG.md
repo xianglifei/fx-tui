@@ -3,6 +3,44 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.15.0] - 2026-08-29
+
+### 功能：收录 14 款 Ghostty 热门主题（深色 10 + 浅色 4）
+
+- **动机**：0.14.0 的双主题（浅色/深色）解决了黑底可读性，但两套配色仍显单调；
+  用户希望能像换终端主题一样换 fx-tui 的观感
+- **主题选定口径**：Ghostty 官方并不发布主题热度数据（无遥测、`+list-themes`
+  纯字母序，无 popular 标注——调研核实过源码与本机 1.3.1 二进制），因此按
+  **公开 dotfiles 使用量**统计（GitHub 代码搜索 ghostty 配置中的 `theme =`
+  赋值频次，2026-08）：取最热门的十个主题家族、每家族收录其最热门变体（全
+  部深色）——Catppuccin Mocha、TokyoNight Night、Gruvbox Dark、Rose Pine
+  Moon、Dracula、Kanagawa Wave、Nord、Ayu、Everforest Dark Hard、Solarized
+  Dark Higher Contrast；另按同一口径补录使用量最高的四款浅色变体（Catppuccin
+  Latte 41 处、Gruvbox Light 14、Rose Pine Dawn 11、TokyoNight Day 8），让
+  浅底终端用户同样有得选，主题菜单中的 深/浅 标注即来自各主题自身背景色的
+  亮度判定；色值自本机 Ghostty 1.3.1 官方主题文件**程序化提取、原样移植**
+  （上游源为 mbadolato/iTerm2-Color-Schemes，`ui/ghostty-themes.ts` 纯数据
+  文件）
+- **语义 token 派生（自适应槽位）**：每款主题的 16 色 ANSI 调色板按语义槽位
+  映射（cyan→accent、yellow→warning、green→success、red→danger、blue→info、
+  magenta→approval），normal/bright 变体按「与主题自身背景对比度更高者」逐槽
+  选择——浅色主题的槽位约定差异极大（Gruvbox Light 把更深的颜色放在 bright
+  槽、Rose Pine 两槽同色、TokyoNight Day 完全相同），固定规则无法通吃；柔和
+  调校的主题（如 Rose Pine Dawn 的金色）若对比度不足 2.5:1，向主题前景色渐
+  进混合兜底（保色相、复可读），muted 槽因叠加 dimColor 用更强的 3.5:1 下限；
+  用户消息条为「主题背景向 accent 混色（深色 32% / 浅色 28%）」的着色底 +
+  主题前景文字；代码块高亮、diff 着色、markdown 样式全部由同一套 token 派生，
+  零新增依赖。14 款主题的全部语义色经脚本断言：深色款 ≥ 3:1，浅色款 ≥ 2.5:1
+  （柔和系主题的忠实移植限度，与内置浅色主题的 ANSI yellow 实际水平一致）
+- **`/theme` 升级**：交互选择改为两级——基础档（自动检测 / 浅色 / 深色 /
+  Ghostty 精选 14 款）+ Ghostty 主题分页列表（数字键问题面板上限 9 项，故
+  8 个/页 + 下一页/上一页/返回导航，14 款分两页：第 1 页深色 8 款、第 2 页
+  深色 2 款 + 浅色 4 款）；直给形式支持主题 id、显示名（如
+  `/theme Catppuccin Mocha`，空格连字符等价）与原有中文别名，未知主题名弹
+  出全量可用列表面板；`/status` 主题行在保存档与当前显示一致时不再重复
+  显示两遍；选择持久化到设置文件（`theme` 字段存主题 id），非法值回退 auto，
+  切换即全量重挂重绘。版本号升至 0.15.0
+
 ## [0.14.0] - 2026-08-28
 
 ### 功能：双主题配色 + 终端背景色自动检测

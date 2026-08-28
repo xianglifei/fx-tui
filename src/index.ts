@@ -55,12 +55,13 @@ import { App } from './ui/App.js'
 import { draftCapture, trayDetailText } from './ui/Input.js'
 import type { MenuEntry } from './ui/Input.js'
 import { textRows } from './ui/ink-text.js'
-import { activeThemeName, resolveTheme, setActiveTheme } from './ui/theme.js'
+import { activeThemeName, resolveTheme, setActiveTheme, themeDisplayLabel, GHOSTTY_PICKER_ENTRIES } from './ui/theme.js'
 import type { ThemeName, ThemeSetting } from './ui/theme.js'
+import type { GhosttyThemeId } from './ui/ghostty-themes.js'
 import { installedRoot, performSelfUpdate } from './update.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.14.0'
+export const FX_TUI_VERSION = '0.15.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
@@ -287,7 +288,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     { name: 'sessions', description: '切换到另一个会话', kind: 'builtin' },
     { name: 'model', description: '切换模型 / provider', kind: 'builtin' },
     { name: 'config', description: '查看 / 修改设置（权限模式、自动更新）', kind: 'builtin' },
-    { name: 'theme', description: '切换配色主题：自动检测 / 浅色 / 深色', kind: 'builtin' },
+    { name: 'theme', description: '切换配色主题：自动 / 浅色 / 深色 / Ghostty 精选', kind: 'builtin' },
     { name: 'export', description: '导出当前会话为 Markdown', kind: 'builtin' },
     { name: 'edit', description: '用 $EDITOR 编写长消息', kind: 'builtin' },
     { name: 'image', description: '附加图片：<路径>… 或直接拖入终端；空参查看明细', kind: 'builtin' },
@@ -485,15 +486,20 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
 
   // -- Theme ------------------------------------------------------------------
 
+  /** Direct-form lookup: base words plus every Ghostty id and display name
+   * (normalized: lowercase, runs of spaces become hyphens). */
   const THEME_WORDS: Record<string, ThemeSetting> = {
     auto: 'auto', light: 'light', dark: 'dark',
     自动: 'auto', 自动检测: 'auto',
     浅色: 'light', 深色: 'dark',
   }
+  for (const entry of GHOSTTY_PICKER_ENTRIES) {
+    THEME_WORDS[entry.id] = entry.id
+    THEME_WORDS[entry.name.toLowerCase().replace(/\s+/g, '-')] = entry.id
+  }
 
-  const themeLabel = (name: ThemeName): string => name === 'dark' ? '深色' : '浅色'
   const themeSettingLabel = (setting: ThemeSetting): string =>
-    setting === 'auto' ? '自动检测' : themeLabel(setting)
+    setting === 'auto' ? '自动检测' : themeDisplayLabel(setting)
 
   /** Persist a theme choice and re-render everything in its palette. */
   function applyTheme(setting: ThemeSetting): void {
@@ -509,7 +515,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     store.addNotice(
       `主题已保存为${themeSettingLabel(setting)}`
       + (setting === 'auto'
-        ? detectedTheme !== null ? `：当前终端检测为${themeLabel(resolved)}背景` : '：未能检测终端背景色，本次按浅色处理'
+        ? detectedTheme !== null ? `：当前终端检测为${themeDisplayLabel(resolved)}背景` : '：未能检测终端背景色，本次按浅色处理'
         : '')
       + `（${settings.location}）`,
     )
@@ -520,31 +526,82 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     void remountForThemeChange()
   }
 
-  /** `/theme`: interactive picker, or a direct one-shot form
-   * (`/theme auto|light|dark`, 中文别名同义). */
+  /** Paged Ghostty picker: digit-key questions hold at most nine options, so
+   * the themes flow through 8-per-page questions with next/previous/back
+   * navigation entries. */
+  async function pickGhosttyTheme(): Promise<GhosttyThemeId | undefined> {
+    const PAGE_SIZE = 8
+    const pageCount = Math.ceil(GHOSTTY_PICKER_ENTRIES.length / PAGE_SIZE)
+    let page = 0
+    for (;;) {
+      const entries = GHOSTTY_PICKER_ENTRIES.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+      const options: { label: string; description?: string }[] = entries.map(entry => ({
+        label: entry.name,
+        description: `${entry.dark ? '深色' : '浅色'} · ${entry.summary}`,
+      }))
+      if (page < pageCount - 1) options.push({ label: '▸ 下一页', description: `第 ${page + 2}/${pageCount} 页` })
+      if (page > 0) options.push({ label: '◂ 上一页', description: `第 ${page}/${pageCount} 页` })
+      options.push({ label: '◂ 返回基础选项' })
+      const chosen = await pick('Ghostty 精选主题（深色 10 · 浅色 4）', options)
+      if (chosen === undefined) return undefined
+      if (chosen === '▸ 下一页') {
+        page += 1
+        continue
+      }
+      if (chosen === '◂ 上一页') {
+        page -= 1
+        continue
+      }
+      if (chosen === '◂ 返回基础选项') return undefined
+      return entries.find(entry => entry.name === chosen)?.id
+    }
+  }
+
+  /** `/theme`: interactive picker (base themes, or the paged Ghostty
+   * selection), or a direct one-shot form (`/theme auto|light|dark`,
+   * `/theme <ghostty-id>`, display names and 中文别名 all accepted). */
   async function runTheme(arg: string): Promise<void> {
-    const key = arg.split(/\s+/).filter(token => token !== '')[0]?.toLowerCase()
-    if (key !== undefined) {
+    const raw = arg.trim()
+    if (raw !== '') {
+      const key = raw.toLowerCase().replace(/\s+/g, '-')
       const target = THEME_WORDS[key]
       if (target === undefined) {
-        store.addNotice('用法：/theme（交互选择）· /theme auto|light|dark（自动检测 / 浅色 / 深色）', 'warn')
+        store.addPanel('未知主题', [
+          `未找到主题「${raw}」。基础主题：auto / light / dark（自动检测 / 浅色 / 深色）`,
+          '',
+          'Ghostty 精选：',
+          ...GHOSTTY_PICKER_ENTRIES.map(entry => `· ${entry.id}（${entry.name} · ${entry.dark ? '深色' : '浅色'}）`),
+          '',
+          '或直接运行 /theme 用菜单选择。',
+        ])
         return
       }
       applyTheme(target)
       return
     }
-    const current = settings.theme
-    const currentTone = resolveTheme(current, detectedTheme)
-    const chosen = await pick(
-      `配色主题（当前 ${themeSettingLabel(current)}，显示为${themeLabel(currentTone)}）`,
-      [
-        { label: '自动检测', description: '启动时探测终端背景色（OSC 11），测不出按浅色' },
-        { label: '浅色', description: '为浅色背景终端优化' },
-        { label: '深色', description: '为深色/黑背景终端优化' },
-      ],
-    )
-    const target = THEME_WORDS[chosen ?? '']
-    if (target !== undefined) applyTheme(target)
+    for (;;) {
+      const current = settings.theme
+      const currentTone = resolveTheme(current, detectedTheme)
+      const chosen = await pick(
+        `配色主题（当前 ${themeSettingLabel(current)}，显示为${themeDisplayLabel(currentTone)}）`,
+        [
+          { label: '自动检测', description: '启动时探测终端背景色（OSC 11），测不出按浅色' },
+          { label: '浅色', description: '内置浅色配色（跟随终端 ANSI 色映射）' },
+          { label: '深色', description: '内置深色配色（hex 定色，黑底可读）' },
+          { label: 'Ghostty 精选（14 款）', description: '社区最热门主题移植（10 深 + 4 浅）' },
+        ],
+      )
+      if (chosen === undefined) return
+      if (chosen === 'Ghostty 精选（14 款）') {
+        const id = await pickGhosttyTheme()
+        if (id === undefined) continue // back / Esc: return to the base picker
+        applyTheme(id)
+        return
+      }
+      const target = THEME_WORDS[chosen]
+      if (target !== undefined) applyTheme(target)
+      return
+    }
   }
 
 
@@ -666,7 +723,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
             'Shift+Tab 切换权限模式（每次询问 ⇄ 自动允许） · Ctrl+O 工具详情 摘要⇄完整',
             'Ctrl+C 清空输入（空输入双击退出）',
             '',
-            '内置命令：/help 帮助 · /config 设置（含启动默认权限模式） · /theme 配色主题（自动检测/浅色/深色） ·',
+            '内置命令：/help 帮助 · /config 设置（含启动默认权限模式） · /theme 配色主题（自动/浅色/深色/Ghostty 精选） ·',
             '  /edit 用 $EDITOR 写长消息 ·',
             '  /image <路径…> 附加图片（可拖拽入窗，空参看明细）· /update 升级自身 · /exit 退出',
             'dsh 命令（来自注册表）：/compact 压缩历史 · /goal 长任务目标 ·',
@@ -684,6 +741,8 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
             })
           } catch { /* registry inspection is display-optional */ }
           const snapshot = store.getSnapshot()
+          const themeActiveLabel = themeDisplayLabel(activeThemeName())
+          const themeSavedLabel = themeSettingLabel(settings.theme)
           const context = snapshot.contextWindow !== undefined && snapshot.contextWindow > 0
             ? `${snapshot.contextTokens} / ${snapshot.contextWindow} tokens`
             : `${snapshot.contextTokens} tokens`
@@ -693,7 +752,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
             `fx-tui v${FX_TUI_VERSION} · Node ${process.version} · ${process.platform}/${process.arch}`,
             `模型：${modelLabel()} · 会话：${agent.id}`,
             `权限模式：当前会话 ${modeLabel(snapshot.approvalMode)}（shift+tab 切换）· 启动默认 ${modeLabel(settings.approvalMode)}（/config 修改）`,
-            `主题：${themeSettingLabel(settings.theme)}，显示为${themeLabel(activeThemeName())}（/theme 修改）`,
+            `主题：${themeSavedLabel === themeActiveLabel ? themeActiveLabel : `${themeSavedLabel}，显示为${themeActiveLabel}`}（/theme 修改）`,
             `上下文：${context} · 工作区：${process.cwd()}`,
             '',
             `已加载插件（${plugins.length}）：`,
