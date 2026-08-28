@@ -26,7 +26,7 @@ import { theme } from './theme.js'
 export interface MenuEntry {
   readonly name: string
   readonly description: string
-  readonly kind: 'builtin' | 'dsh'
+  readonly kind: 'builtin' | 'dsh' | 'skill'
 }
 
 export interface InputBoxProps {
@@ -66,13 +66,20 @@ export interface EditorState {
  */
 export const draftCapture: { state: EditorState | null } = { state: null }
 
+/** One rendered menu line: a selectable entry, or a non-selectable section
+ * header (the skill group) that still occupies a visible slot. */
+type MenuRow =
+  | { readonly type: 'header'; readonly label: string }
+  | { readonly type: 'entry'; readonly label: string; readonly description: string; readonly skill: boolean }
+
 interface Menu {
   kind: 'commands' | 'files'
   query: string
-  /** The full filtered list — the menu scrolls, nothing is dropped here. */
-  entries: readonly { label: string; description: string }[]
+  /** Rendered lines in order, headers included — the window slides over rows. */
+  rows: readonly MenuRow[]
+  /** Highlighted row; the invariant is that it always points at an entry row. */
   index: number
-  /** First visible row of the MENU_SLOTS-tall sliding window over entries. */
+  /** First visible row of the MENU_SLOTS-tall sliding window over rows. */
   scroll: number
 }
 
@@ -108,7 +115,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
   // (columns − 4), so the wrapped row count — not the line count — is what
   // occupies rows.
   useLayoutEffect(() => {
-    const menuOpen = menu !== null && menu.entries.length > 0
+    const menuOpen = menu !== null && menu.rows.length > 0
     const inner = Math.max(8, termColumns - 4)
     const editorRows = ed.lines.reduce((n, line) => n + textRows(line === '' ? ' ' : line, inner), 0)
     const h = 2 + editorRows +
@@ -141,20 +148,36 @@ export function InputBox(props: InputBoxProps): ReactElement {
     const line = ed.lines[ed.row] ?? ''
     const before = Array.from(line).slice(0, ed.col).join('')
 
-    // Slash menu: the whole input is one unfinished command word.
+    // Slash menu: the whole input is one unfinished command or skill word.
     if (text.startsWith('/') && !text.includes(' ') && !text.includes('\n')) {
       const query = text.slice(1).toLowerCase()
       if (dismissedQueryRef.current === `/${query}`) {
         setMenu(null)
         return
       }
-      const entries = listCommands()
-        .filter(entry => entry.name.toLowerCase().startsWith(query))
-        .map(entry => ({ label: `/${entry.name}`, description: entry.description }))
-      const index = Math.min(menuIndexRef.current, Math.max(0, entries.length - 1))
-      const scroll = clampScroll(menuScrollRef.current, index, entries.length)
+      const commands: MenuRow[] = []
+      const skills: MenuRow[] = []
+      for (const entry of listCommands()) {
+        if (!entry.name.toLowerCase().startsWith(query)) continue
+        const row: MenuRow = {
+          type: 'entry',
+          label: `/${entry.name}`,
+          description: entry.description,
+          skill: entry.kind === 'skill',
+        }
+        ;(entry.kind === 'skill' ? skills : commands).push(row)
+      }
+      const rows: readonly MenuRow[] = skills.length > 0
+        ? [...commands, { type: 'header', label: '技能' }, ...skills]
+        : commands
+      if (rows.length === 0) {
+        setMenu(null)
+        return
+      }
+      const index = clampToEntryRow(rows, menuIndexRef.current)
+      const scroll = clampScroll(menuScrollRef.current, index, rows.length)
       menuScrollRef.current = scroll
-      setMenu(entries.length > 0 ? { kind: 'commands', query, entries, index, scroll } : null)
+      setMenu({ kind: 'commands', query, rows, index, scroll })
       return
     }
 
@@ -169,12 +192,16 @@ export function InputBox(props: InputBoxProps): ReactElement {
       let cancelled = false
       void listWorkspaceFiles(process.cwd()).then(files => {
         if (cancelled) return
-        const entries = fuzzyMatchPaths(query, files, MAX_FILE_MATCHES)
-          .map(match => ({ label: match.path, description: '' }))
-        const index = Math.min(menuIndexRef.current, Math.max(0, entries.length - 1))
-        const scroll = clampScroll(menuScrollRef.current, index, entries.length)
+        const rows: readonly MenuRow[] = fuzzyMatchPaths(query, files, MAX_FILE_MATCHES)
+          .map(match => ({ type: 'entry' as const, label: match.path, description: '', skill: false }))
+        if (rows.length === 0) {
+          setMenu(null)
+          return
+        }
+        const index = clampToEntryRow(rows, Math.min(menuIndexRef.current, rows.length - 1))
+        const scroll = clampScroll(menuScrollRef.current, index, rows.length)
         menuScrollRef.current = scroll
-        setMenu(entries.length > 0 ? { kind: 'files', query, entries, index, scroll } : null)
+        setMenu({ kind: 'files', query, rows, index, scroll })
       })
       return () => { cancelled = true }
     }
@@ -236,40 +263,46 @@ export function InputBox(props: InputBoxProps): ReactElement {
     }
 
     // Menu navigation takes the arrows, Tab, and Enter while it is open. The
-    // highlight walks the full filtered list; the visible window slides when
-    // the cursor would leave it.
-    if (menu !== null && menu.entries.length > 0) {
+    // highlight walks the full filtered list (section headers are skipped —
+    // they are never selectable); the visible window slides when the cursor
+    // would leave it.
+    if (menu !== null && menu.rows.length > 0) {
       if (key.upArrow || key.downArrow) {
         const index = key.upArrow
-          ? Math.max(0, menu.index - 1)
-          : Math.min(menu.entries.length - 1, menu.index + 1)
+          ? prevEntryRow(menu.rows, menu.index)
+          : nextEntryRow(menu.rows, menu.index)
+        if (index === menu.index) return
         menuIndexRef.current = index
-        menuScrollRef.current = clampScroll(menu.scroll, index, menu.entries.length)
+        menuScrollRef.current = clampScroll(menu.scroll, index, menu.rows.length)
         setMenu({ ...menu, index, scroll: menuScrollRef.current })
         return
       }
       if (key.tab) {
-        applyMenuCompletion(menu.entries[menu.index]!.label)
+        const row = menu.rows[menu.index]!
+        if (row.type === 'entry') applyMenuCompletion(row.label)
         return
       }
       if (key.return) {
-        if (menu.kind === 'commands') {
-          const entry = menu.entries[menu.index]!
-          runCommand(entry.label)
-          setEd({ lines: [''], row: 0, col: 0 })
-          setHistIdx(-1)
-          setDraft(null)
-          // Close in the same batch as the command's store update: the menu's
-          // 11 rows must not share a frame with the panel/notice the command
-          // just added — that frame overflows the viewport, the terminal
-          // scrolls, and ink's incremental renderer never re-syncs its cursor
-          // model, leaving the input box stranded above the bottom row.
-          setMenu(null)
-          menuIndexRef.current = 0
-          menuScrollRef.current = 0
-        } else {
-          applyMenuCompletion(menu.entries[menu.index]!.label)
+        const row = menu.rows[menu.index]!
+        if (row.type !== 'entry') return
+        if (menu.kind === 'files' || row.skill) {
+          // Skills (and any file entry) complete into the draft — the user
+          // keeps typing the task text around the /name gesture.
+          applyMenuCompletion(row.label)
+          return
         }
+        runCommand(row.label)
+        setEd({ lines: [''], row: 0, col: 0 })
+        setHistIdx(-1)
+        setDraft(null)
+        // Close in the same batch as the command's store update: the menu's
+        // 11 rows must not share a frame with the panel/notice the command
+        // just added — that frame overflows the viewport, the terminal
+        // scrolls, and ink's incremental renderer never re-syncs its cursor
+        // model, leaving the input box stranded above the bottom row.
+        setMenu(null)
+        menuIndexRef.current = 0
+        menuScrollRef.current = 0
         return
       }
       // Any other key falls through to normal editing; the menu re-derives.
@@ -553,7 +586,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
 
   return (
     <Box flexDirection="column">
-      {menu !== null && menu.entries.length > 0 && (
+      {menu !== null && menu.rows.length > 0 && (
         // The pane always renders MENU_SLOTS slot rows (blank-filled) plus the
         // hint row, so its height stays constant while filtering and the input
         // box stays pinned to the bottom row. Deliberately NOT set via the
@@ -562,12 +595,15 @@ export function InputBox(props: InputBoxProps): ReactElement {
         // positions and render on top of each other), while the natural
         // content height is already constant here.
         <Box flexDirection="column" borderStyle="round" borderColor={theme.muted} paddingX={1}>
-          {Array.from({ length: MENU_SLOTS }, (_, row) => {
-            const entry = menu.entries[menu.scroll + row]
-            if (entry === undefined) return <Text key={`blank-${row}`}>{' '}</Text>
+          {Array.from({ length: MENU_SLOTS }, (_, line) => {
+            const row = menu.rows[menu.scroll + line]
+            if (row === undefined) return <Text key={`blank-${line}`}>{' '}</Text>
+            if (row.type === 'header') {
+              return <Text key={`header-${line}`} dimColor>{`— ${row.label} —`}</Text>
+            }
             return (
-              <Text key={entry.label} inverse={menu.scroll + row === menu.index}>
-                {`${entry.label}${entry.description !== '' ? `  ${entry.description}` : ''}`}
+              <Text key={row.label} inverse={menu.scroll + line === menu.index}>
+                {`${row.label}${row.description !== '' ? `  ${row.description}` : ''}`}
               </Text>
             )
           })}
@@ -615,13 +651,35 @@ function clampScroll(scroll: number, index: number, length: number): number {
   return at
 }
 
+/** Nearest selectable entry row at or after `at` (walking forward suffices: a
+ * header is always followed by its section's entries, so it can only be
+ * skipped over, never landed on). */
+function clampToEntryRow(rows: readonly MenuRow[], at: number): number {
+  let i = Math.min(Math.max(0, at), rows.length - 1)
+  while (i < rows.length - 1 && rows[i]!.type === 'header') i++
+  return i
+}
+
+/** Row of the previous entry, holding position at the first one. */
+function prevEntryRow(rows: readonly MenuRow[], from: number): number {
+  for (let i = from - 1; i >= 0; i--) if (rows[i]!.type === 'entry') return i
+  return from
+}
+
+/** Row of the next entry, holding position at the last one. */
+function nextEntryRow(rows: readonly MenuRow[], from: number): number {
+  for (let i = from + 1; i < rows.length; i++) if (rows[i]!.type === 'entry') return i
+  return from
+}
+
 /** One-row menu footer; prepends the window position when the filtered list
  * outgrows the visible slots, without adding a row to the fixed-height pane. */
 function menuHint(menu: Menu): string {
-  const position = menu.entries.length > MENU_SLOTS
-    ? `第 ${menu.index + 1}/${menu.entries.length} 项 · `
+  const entries = menu.rows.filter(row => row.type === 'entry').length
+  const position = entries > MENU_SLOTS
+    ? `第 ${menu.rows.slice(0, menu.index + 1).filter(row => row.type === 'entry').length}/${entries} 项 · `
     : ''
-  return `${position}↑↓ 选择 · Tab 补全 · Enter ${menu.kind === 'commands' ? '执行' : '补全'} · Esc 关闭`
+  return `${position}↑↓ 选择 · Tab 补全 · Enter ${menu.kind === 'commands' ? '执行/插入' : '补全'} · Esc 关闭`
 }
 
 /** Names of the queued images in the attachment tray; shared by the render and

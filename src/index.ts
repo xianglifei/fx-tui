@@ -30,7 +30,8 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 // Declaration-merge carriers: importing these types registers the ctx keys and
 // events we consume (agents, agentDefaultModel, sessions, session/event,
-// approval/request, userQuestions, tokenMeter, cmdlineArgs, appExit).
+// approval/request, userQuestions, tokenMeter, cmdlineArgs, appExit, skills,
+// skills/change).
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-attachment'
@@ -38,6 +39,7 @@ import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-query'
+import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
@@ -61,7 +63,7 @@ import type { GhosttyThemeId } from './ui/ghostty-themes.js'
 import { installedRoot, performSelfUpdate } from './update.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.15.0'
+export const FX_TUI_VERSION = '0.16.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
@@ -73,7 +75,7 @@ const RESIZE_DEBOUNCE_MS = 300
 export const name = 'fx-tui-runner'
 
 /** Core services required before the TUI can drive an agent. */
-export const inject = ['agentDefaultModel', 'agents', 'sessions', 'userQuestions', 'attachments', 'commands', 'llm', 'sessionQuery']
+export const inject = ['agentDefaultModel', 'agents', 'sessions', 'userQuestions', 'attachments', 'commands', 'llm', 'sessionQuery', 'skills']
 
 const USAGE = `fx-tui v${FX_TUI_VERSION} — DeepSeek Harness 的交互式终端界面
 
@@ -85,6 +87,9 @@ const USAGE = `fx-tui v${FX_TUI_VERSION} — DeepSeek Harness 的交互式终端
   -v, --version          显示版本
 
 按键：Enter 发送 · Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全 · Shift+Tab 权限模式 · Esc 中断 · Ctrl+O 工具详情 · Ctrl+C 清空/双击退出
+
+命令与技能：输入 / 弹出补全菜单（上半是命令，往下是技能分组，随输入实时筛选）；
+选中技能插入 /技能名 手势，回车发送后模型自动加载该技能（也可在消息中直接写 /技能名）。
 `
 
 interface CliOptions {
@@ -326,6 +331,8 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
       await handle.dispose()
       handle = await registry.resume({ resumeSessionId: SessionId(sessionId), agentOptions: agent.options, setup })
       agent = handle.agent
+      // The new session may live in another workspace: project skills differ.
+      void refreshSkills()
       childAgents.clear()
       syncChildCount()
       store.reset(agent.id, modelLabel(), agent.session.events)
@@ -698,6 +705,27 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     }
   }
 
+  // -- Slash menu: commands + skills ------------------------------------------
+
+  /** User-invocable skills merged into the slash menu under their own section.
+   * The catalog is display-optional: a failed fetch keeps the last good list. */
+  let skillEntries: readonly MenuEntry[] = []
+  /** Lookup options shared by the menu refresh and the /name passthrough. */
+  const skillLookup = (): { cwd: string; scope: object } => ({
+    cwd: agent.session.header.cwd ?? process.cwd(),
+    scope: agent,
+  })
+  async function refreshSkills(): Promise<void> {
+    try {
+      const skills = await ctx.skills.list(skillLookup())
+      skillEntries = skills
+        .filter(skill => skill.invocation.userInvocable)
+        .map(skill => ({ name: skill.name, description: skill.description, kind: 'skill' as const }))
+    } catch { /* the catalog is display-optional */ }
+  }
+  void refreshSkills()
+  ctx.on('skills/change', () => { void refreshSkills() })
+
   function listCommands(): readonly MenuEntry[] {
     const dsh: MenuEntry[] = []
     try {
@@ -706,7 +734,10 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
         dsh.push({ name: descriptor.name, description: descriptor.description, kind: 'dsh' })
       }
     } catch { /* the registry is display-optional */ }
-    return [...builtinCommands, ...dsh]
+    const commands = [...builtinCommands, ...dsh]
+    // Commands win same-name collisions, mirroring runCommand's dispatch order.
+    const skills = skillEntries.filter(skill => !commands.some(command => command.name === skill.name))
+    return [...commands, ...skills]
   }
 
   async function runCommand(line: string): Promise<void> {
@@ -728,6 +759,8 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
             '  /image <路径…> 附加图片（可拖拽入窗，空参看明细）· /update 升级自身 · /exit 退出',
             'dsh 命令（来自注册表）：/compact 压缩历史 · /goal 长任务目标 ·',
             '  /feedback 反馈（输入 / 查看全部）',
+            '技能：/ 菜单下半的技能分组里选中插入 /技能名 手势，回车发送后模型自动加载；',
+            '  在消息里直接写 /技能名 亦可（命令优先于同名技能）',
           ])
           return
         case 'exit': case 'quit': case 'bye':
@@ -827,7 +860,16 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
               store.addNotice(`/${name} 完成`)
             }
           } else {
-            store.addNotice(`未知命令：/${name}（输入 / 查看可用命令）`, 'warn')
+            // Unknown to both command registries, the name may still address a
+            // user-invocable skill: the upstream agent detects the /name gesture
+            // in user messages and injects the skill body itself, so the whole
+            // line rides as a plain message instead of erroring out.
+            const skill = await ctx.skills.get(name, skillLookup()).catch(() => undefined)
+            if (skill !== undefined && skill.invocation.userInvocable) {
+              actions.onSubmit(trimmed)
+            } else {
+              store.addNotice(`未知命令：/${name}（输入 / 查看可用命令与技能）`, 'warn')
+            }
           }
           return
         }

@@ -101,8 +101,13 @@ fx --resume <id>                    # 恢复会话
 
 ### 输入效率
 
-- **Slash 命令补全菜单**：`/` 弹出菜单（内置 + dsh 命令注册表自动并入：
-  /compact、/feedback、/goal、/permission…），↑↓ 导航、Tab 补全、Enter 执行
+- **Slash 命令与技能补全菜单**：`/` 弹出菜单，上半是命令（内置 + dsh 命令注册表
+  自动并入：/compact、/feedback、/goal、/permission…），往下是**技能分组**
+  （dsh 技能注册表：项目 `.dsh/skills`、`.agents/skills` 与用户 `~/.dsh/skills`、
+  `~/.agents/skills`），随输入实时筛选；↑↓ 导航（跳过分组头）、Tab 补全、
+  Enter 执行命令或插入技能；选中技能在输入框插入 `/技能名 ` 手势，回车发送后
+  由 dsh 上游自动加载技能全文（在消息里直接写 `/技能名` 亦可触发），命令优先于
+  同名技能
 - **@-文件引用**：输入 `@` 弹出工作区文件的 fuzzy 路径补全（零依赖自研评分器），
   选中后模型自动读取该文件
 - **$EDITOR 长消息**：`/edit` 挂起 TUI → 打开 `$EDITOR` → 编辑内容回填输入框
