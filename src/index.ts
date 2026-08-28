@@ -50,14 +50,17 @@ import { FxSettings } from './settings.js'
 import { TuiStore } from './store.js'
 import type { ApprovalMode, ToolPresenter } from './store.js'
 import { blocksToTextOf, formatToolArgs, toolResultCallIdOf, toolResultTextOf } from './store.js'
+import { detectTerminalBackground } from './terminal-bg.js'
 import { App } from './ui/App.js'
 import { draftCapture, trayDetailText } from './ui/Input.js'
 import type { MenuEntry } from './ui/Input.js'
 import { textRows } from './ui/ink-text.js'
+import { activeThemeName, resolveTheme, setActiveTheme } from './ui/theme.js'
+import type { ThemeName, ThemeSetting } from './ui/theme.js'
 import { installedRoot, performSelfUpdate } from './update.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.13.4'
+export const FX_TUI_VERSION = '0.14.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
@@ -191,6 +194,9 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
   // Startup default approval stance comes from the persisted settings file
   // (default 'auto'); Shift+Tab then changes the session without touching it.
   const settings = new FxSettings(process.env.DSH_HOME)
+  // Background tone detected once before the first render; /theme auto
+  // re-resolves against this value instead of re-querying the terminal.
+  let detectedTheme: ThemeName | null = null
   const store = new TuiStore(agent.id, modelLabel(), presenter, settings.approvalMode)
   const memory = new ApprovalMemory(process.env.DSH_HOME)
   store.addBanner({
@@ -281,6 +287,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     { name: 'sessions', description: '切换到另一个会话', kind: 'builtin' },
     { name: 'model', description: '切换模型 / provider', kind: 'builtin' },
     { name: 'config', description: '查看 / 修改设置（权限模式、自动更新）', kind: 'builtin' },
+    { name: 'theme', description: '切换配色主题：自动检测 / 浅色 / 深色', kind: 'builtin' },
     { name: 'export', description: '导出当前会话为 Markdown', kind: 'builtin' },
     { name: 'edit', description: '用 $EDITOR 编写长消息', kind: 'builtin' },
     { name: 'image', description: '附加图片：<路径>… 或直接拖入终端；空参查看明细', kind: 'builtin' },
@@ -476,6 +483,70 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     )
   }
 
+  // -- Theme ------------------------------------------------------------------
+
+  const THEME_WORDS: Record<string, ThemeSetting> = {
+    auto: 'auto', light: 'light', dark: 'dark',
+    自动: 'auto', 自动检测: 'auto',
+    浅色: 'light', 深色: 'dark',
+  }
+
+  const themeLabel = (name: ThemeName): string => name === 'dark' ? '深色' : '浅色'
+  const themeSettingLabel = (setting: ThemeSetting): string =>
+    setting === 'auto' ? '自动检测' : themeLabel(setting)
+
+  /** Persist a theme choice and re-render everything in its palette. */
+  function applyTheme(setting: ThemeSetting): void {
+    const resolved = resolveTheme(setting, detectedTheme)
+    const savedChanged = settings.theme !== setting
+    const activeChanged = activeThemeName() !== resolved
+    settings.setTheme(setting)
+    setActiveTheme(resolved)
+    if (!savedChanged && !activeChanged) {
+      store.addNotice(`主题已是${themeSettingLabel(setting)}（${settings.location}）`)
+      return
+    }
+    store.addNotice(
+      `主题已保存为${themeSettingLabel(setting)}`
+      + (setting === 'auto'
+        ? detectedTheme !== null ? `：当前终端检测为${themeLabel(resolved)}背景` : '：未能检测终端背景色，本次按浅色处理'
+        : '')
+      + `（${settings.location}）`,
+    )
+    if (!activeChanged) return
+    // The submitted command text is consumed, not a draft to carry over: the
+    // module-level capture would otherwise restore it into the fresh editor.
+    draftCapture.state = null
+    void remountForThemeChange()
+  }
+
+  /** `/theme`: interactive picker, or a direct one-shot form
+   * (`/theme auto|light|dark`, 中文别名同义). */
+  async function runTheme(arg: string): Promise<void> {
+    const key = arg.split(/\s+/).filter(token => token !== '')[0]?.toLowerCase()
+    if (key !== undefined) {
+      const target = THEME_WORDS[key]
+      if (target === undefined) {
+        store.addNotice('用法：/theme（交互选择）· /theme auto|light|dark（自动检测 / 浅色 / 深色）', 'warn')
+        return
+      }
+      applyTheme(target)
+      return
+    }
+    const current = settings.theme
+    const currentTone = resolveTheme(current, detectedTheme)
+    const chosen = await pick(
+      `配色主题（当前 ${themeSettingLabel(current)}，显示为${themeLabel(currentTone)}）`,
+      [
+        { label: '自动检测', description: '启动时探测终端背景色（OSC 11），测不出按浅色' },
+        { label: '浅色', description: '为浅色背景终端优化' },
+        { label: '深色', description: '为深色/黑背景终端优化' },
+      ],
+    )
+    const target = THEME_WORDS[chosen ?? '']
+    if (target !== undefined) applyTheme(target)
+  }
+
 
   async function exportSession(): Promise<void> {
     const lines: string[] = [
@@ -595,7 +666,8 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
             'Shift+Tab 切换权限模式（每次询问 ⇄ 自动允许） · Ctrl+O 工具详情 摘要⇄完整',
             'Ctrl+C 清空输入（空输入双击退出）',
             '',
-            '内置命令：/help 帮助 · /config 设置（含启动默认权限模式） · /edit 用 $EDITOR 写长消息 ·',
+            '内置命令：/help 帮助 · /config 设置（含启动默认权限模式） · /theme 配色主题（自动检测/浅色/深色） ·',
+            '  /edit 用 $EDITOR 写长消息 ·',
             '  /image <路径…> 附加图片（可拖拽入窗，空参看明细）· /update 升级自身 · /exit 退出',
             'dsh 命令（来自注册表）：/compact 压缩历史 · /goal 长任务目标 ·',
             '  /feedback 反馈（输入 / 查看全部）',
@@ -621,6 +693,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
             `fx-tui v${FX_TUI_VERSION} · Node ${process.version} · ${process.platform}/${process.arch}`,
             `模型：${modelLabel()} · 会话：${agent.id}`,
             `权限模式：当前会话 ${modeLabel(snapshot.approvalMode)}（shift+tab 切换）· 启动默认 ${modeLabel(settings.approvalMode)}（/config 修改）`,
+            `主题：${themeSettingLabel(settings.theme)}，显示为${themeLabel(activeThemeName())}（/theme 修改）`,
             `上下文：${context} · 工作区：${process.cwd()}`,
             '',
             `已加载插件（${plugins.length}）：`,
@@ -636,6 +709,9 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
           return
         case 'config': case 'setting': case 'settings':
           await runConfig(rest)
+          return
+        case 'theme':
+          await runTheme(rest)
           return
         case 'export':
           await exportSession()
@@ -884,6 +960,14 @@ function bottomFlush(): void {
     },
   }
 
+  // Theme resolution needs the terminal's background tone: an explicit
+  // setting wins; otherwise the OSC 11 detection decides. Detection borrows
+  // stdin in raw mode for a bounded window BEFORE ink takes the terminal over
+  // (same ownership window the wipe/home writes run in).
+  detectedTheme = await detectTerminalBackground()
+  setActiveTheme(resolveTheme(settings.theme, detectedTheme))
+  debugLog('theme', { setting: settings.theme, detected: detectedTheme, resolved: activeThemeName() })
+
   wipeViewport()
   homeCursor()
   instance = render(
@@ -930,13 +1014,12 @@ function bottomFlush(): void {
     }, RESIZE_DEBOUNCE_MS)
   }
 
-  const remountAtCurrentSize = async (): Promise<void> => {
+  /** Shared remount body: unmount, reset the terminal, and replay the whole
+   * transcript as the sole copy. `force` skips the size-unchanged guard —
+   * theme switches remount at the same size to recolor the full transcript. */
+  const performRemount = async (options: { force?: boolean } = {}): Promise<void> => {
     const out = process.stdout
-    if (out.columns === mountedCols && out.rows === mountedRows) return
-    if (rebuilding) {
-      rebuildQueued = true
-      return
-    }
+    if (options.force !== true && out.columns === mountedCols && out.rows === mountedRows) return
     rebuilding = true
     try {
       instance?.unmount()
@@ -983,6 +1066,22 @@ function bottomFlush(): void {
         scheduleRebuild()
       }
     }
+  }
+
+  const remountAtCurrentSize = async (): Promise<void> => {
+    if (rebuilding) {
+      rebuildQueued = true
+      return
+    }
+    await performRemount()
+  }
+
+  /** Full replay in the new palette after a theme switch. When a resize
+   * rebuild is already in flight, skip: its replay picks up the new palette
+   * anyway. */
+  const remountForThemeChange = async (): Promise<void> => {
+    if (rebuilding) return
+    await performRemount({ force: true })
   }
 
   const detachResizeRebuild = (): void => {

@@ -35,7 +35,7 @@ fx --resume <id>                    # 恢复会话
 | `Ctrl+C` | 清空输入；空输入时再按一次退出 |
 | `y` `s` `a` `n` | 审批：一次 / 本会话 / 总是（记住）/ 拒绝 |
 | 数字键 | 问题选项选择 |
-| `/help` `/status` `/sessions` `/model` `/export` `/edit` `/image <路径…>` `/update` `/exit` | 内置命令（`/` 查看全部） |
+| `/help` `/status` `/sessions` `/model` `/theme` `/export` `/edit` `/image <路径…>` `/update` `/exit` | 内置命令（`/` 查看全部） |
 
 ### 审批记忆
 
@@ -61,6 +61,9 @@ fx --resume <id>                    # 恢复会话
 - **状态栏**：阶段 spinner + 思考字数 + token 用量 + **上下文水位**
   （`上下文 N%·已用/容量`，token-meter 驱动）+ 窄终端自动降级
 - **增量渲染**：Ink `incrementalRendering` 只重绘变更行，降低闪烁
+- **双主题自动适配**：启动时经 OSC 11 探测终端背景色，深色终端自动换用为黑
+  底调校的 hex 配色（浅色终端保持原有观感）；`/theme`（自动检测 / 浅色 /
+  深色，支持中文别名）手动固定并持久化，切换即全量重绘整个转录
 
 ### 工具可见性
 

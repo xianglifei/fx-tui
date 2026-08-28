@@ -13,6 +13,7 @@
 import type { ReactElement } from 'react'
 import { Box, Text } from 'ink'
 import type { BannerItem } from '../store.js'
+import { theme } from './theme.js'
 
 /** ANSI-shadow "FX"; every line is LOGO_WIDTH cells wide. */
 const LOGO = [
@@ -67,7 +68,7 @@ export function WelcomeBanner(props: { item: BannerItem; width: number }): React
     <Box
       flexDirection="column"
       borderStyle="round"
-      borderColor="cyan"
+      borderColor={theme.accent}
       paddingX={1}
       width={props.width}
     >
@@ -75,7 +76,7 @@ export function WelcomeBanner(props: { item: BannerItem; width: number }): React
         {showLogo && (
           <Box flexDirection="column" marginRight={LOGO_GAP}>
             {LOGO.map((line, index) => (
-              <Text key={index} color="cyan" bold>{line}</Text>
+              <Text key={index} color={theme.accent} bold>{line}</Text>
             ))}
           </Box>
         )}

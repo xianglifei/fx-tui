@@ -26,6 +26,7 @@ import { BANNER_BOX_HEIGHT, WelcomeBanner } from './Banner.js'
 import { estimateApprovalHeight, estimateItemHeight, estimateQuestionHeight, formatElapsed, truncateLine, userBarRows } from './estimate.js'
 import { InputBox } from './Input.js'
 import { StatusBar } from './StatusBar.js'
+import { theme } from './theme.js'
 
 export interface AppActions {
   onSubmit(text: string): void
@@ -120,12 +121,12 @@ export function App(props: AppProps): ReactElement {
         {snap.queuedMessages.length > 0 && (
           <Box flexDirection="column">
             {snap.queuedMessages.slice(0, 5).map((message, index) => (
-              <Text key={message.id} color="yellow" dimColor>
+              <Text key={message.id} color={theme.warning} dimColor>
                 {`⏳ 已排队${snap.queuedMessages.length > 1 ? `（${index + 1}/${snap.queuedMessages.length}）` : ''}：${truncateLine(message.text, width - 12)}`}
               </Text>
             ))}
             {snap.queuedMessages.length > 5 && (
-              <Text color="yellow" dimColor>{`…（还有 ${snap.queuedMessages.length - 5} 条排队消息）`}</Text>
+              <Text color={theme.warning} dimColor>{`…（还有 ${snap.queuedMessages.length - 5} 条排队消息）`}</Text>
             )}
           </Box>
         )}
@@ -155,22 +156,11 @@ export function App(props: AppProps): ReactElement {
           onHeightChange={setInputHeight}
         />
         <ModeLine mode={snap.approvalMode} />
-        {snap.exitArmed && <Text color="red">再按一次 Ctrl+C 退出 fx-tui</Text>}
+        {snap.exitArmed && <Text color={theme.danger}>再按一次 Ctrl+C 退出 fx-tui</Text>}
       </Box>
     </Box>
   )
 }
-
-/**
- * User-bar tint as a literal hex, deliberately not a named ANSI color: themes
- * remap ANSI gray/light tones towards the theme's own palette — on light-theme
- * terminals "gray" lands near-white and the bar vanishes. The hue mirrors the
- * welcome-banner's rendered teal accent (~181°, brand-cyan family; yellow is
- * reserved for warnings) at pastel lightness, so the bar reads as part of the
- * app's existing palette; near-black text over it stays readable on both light
- * and dark terminals, and chalk degrades the hex gracefully off truecolor.
- */
-const USER_BAR_BACKGROUND = '#bdeef2'
 
 /** One blank row above every user message and assistant reply: the settled
  * transcript keeps a uniform rhythm of a single blank row between items —
@@ -189,10 +179,10 @@ function FinalItemView(props: { item: FinalItem; width: number }): ReactElement 
         <Box flexDirection="column">
           <LeadGap />
           {userBarRows(item.text, width).map((row, i) => (
-            <Text key={i} backgroundColor={USER_BAR_BACKGROUND} color="black" bold>{row}</Text>
+            <Text key={i} backgroundColor={theme.userBarBackground} color={theme.userBarForeground} bold>{row}</Text>
           ))}
           {(item.images ?? []).map((label, i) => (
-            <Text key={`img-${i}`} color="magenta" dimColor>{`📎 ${label}`}</Text>
+            <Text key={`img-${i}`} color={theme.approval} dimColor>{`📎 ${label}`}</Text>
           ))}
         </Box>
       )
@@ -203,7 +193,7 @@ function FinalItemView(props: { item: FinalItem; width: number }): ReactElement 
           {renderMarkdownLines(item.text, width).map((line, i) => (
             <Text key={i}>{line === '' ? ' ' : line}</Text>
           ))}
-          {item.interrupted && <Text color="yellow" dimColor>（回复被中断，以上为已生成的部分）</Text>}
+          {item.interrupted && <Text color={theme.warning} dimColor>（回复被中断，以上为已生成的部分）</Text>}
         </Box>
       )
     case 'tool':
@@ -219,7 +209,7 @@ function FinalItemView(props: { item: FinalItem; width: number }): ReactElement 
     case 'notice':
       return (
         <Text
-          color={item.tone === 'error' ? 'red' : item.tone === 'warn' ? 'yellow' : 'gray'}
+          color={item.tone === 'error' ? theme.danger : item.tone === 'warn' ? theme.warning : theme.muted}
           dimColor={item.tone === 'info'}
         >
           {`${item.tone === 'error' ? '✗ ' : item.tone === 'warn' ? '⚠ ' : '· '}${item.text}`}
@@ -227,8 +217,8 @@ function FinalItemView(props: { item: FinalItem; width: number }): ReactElement 
       )
     case 'panel':
       return (
-        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-          <Text color="cyan" bold>{item.title}</Text>
+        <Box flexDirection="column" borderStyle="round" borderColor={theme.accent} paddingX={1}>
+          <Text color={theme.accent} bold>{item.title}</Text>
           {item.lines.map((line, i) => (
             <Text key={i}>{line === '' ? ' ' : line}</Text>
           ))}
@@ -239,15 +229,15 @@ function FinalItemView(props: { item: FinalItem; width: number }): ReactElement 
 
 function PendingToolView(props: { tool: PendingTool; width: number }): ReactElement {
   return (
-    <Text color="yellow">{`⚙ ${props.tool.title} 运行中…`}</Text>
+    <Text color={theme.warning}>{`⚙ ${props.tool.title} 运行中…`}</Text>
   )
 }
 
 function ToolCardView(props: { item: ToolItem; width: number }): ReactElement {
   const { item, width } = props
-  const color = item.ok ? 'green' : 'red'
+  const color = item.ok ? theme.success : theme.danger
   const view = item.view
-  const border = view?.card === 'diff' ? 'green' : color
+  const border = view?.card === 'diff' ? theme.success : color
 
   if (view !== undefined && view.card === 'diff') {
     const lines = renderFileDiffs(view.diffs)
@@ -373,20 +363,20 @@ function ApprovalView(props: { store: TuiStore; prompt: ApprovalPrompt }): React
     else if (input === 'n' || input === 'N' || key.escape) store.answerApproval('reject')
   })
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}>
-      <Text color="magenta" bold>{`需要批准：${prompt.toolName}`}</Text>
+    <Box flexDirection="column" borderStyle="round" borderColor={theme.approval} paddingX={1}>
+      <Text color={theme.approval} bold>{`需要批准：${prompt.toolName}`}</Text>
       {prompt.command !== undefined && prompt.command !== '' && (
-        <Text color="magenta">{`  ${prompt.command}`}</Text>
+        <Text color={theme.approval}>{`  ${prompt.command}`}</Text>
       )}
       {prompt.reason !== '' && <Text dimColor>{prompt.reason}</Text>}
       <Text>
-        <Text color="green">[y] 允许一次</Text>
+        <Text color={theme.success}>[y] 允许一次</Text>
         {'  '}
-        <Text color="yellow">[s] 本会话不再问</Text>
+        <Text color={theme.warning}>[s] 本会话不再问</Text>
         {'  '}
-        <Text color="cyan">[a] 总是允许（记住）</Text>
+        <Text color={theme.accent}>[a] 总是允许（记住）</Text>
         {'  '}
-        <Text color="red">[n] 拒绝</Text>
+        <Text color={theme.danger}>[n] 拒绝</Text>
       </Text>
     </Box>
   )
@@ -422,8 +412,8 @@ function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width:
     : []
   const shownPlan = planLines.slice(0, 30)
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={isPlanReview ? 'magenta' : 'blue'} paddingX={1}>
-      <Text color={isPlanReview ? 'magenta' : 'blue'} bold>
+    <Box flexDirection="column" borderStyle="round" borderColor={isPlanReview ? theme.approval : theme.info} paddingX={1}>
+      <Text color={isPlanReview ? theme.approval : theme.info} bold>
         {isPlanReview
           ? `计划审批：${item.question}`
           : `问 题${question.total > 1 ? `（${question.index}/${question.total}）` : ''}：${item.question}`}
@@ -448,7 +438,7 @@ function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width:
         return (
           <Text
             key={option.label}
-            color={isApprove ? 'green' : selected ? 'blue' : undefined}
+            color={isApprove ? theme.success : selected ? theme.info : undefined}
             bold={selected || isApprove}
           >
             {`[${index + 1}]${selected ? ' ● ' : ' ○ '}${isApprove ? '✓ ' : ''}${option.label}` +
@@ -470,8 +460,8 @@ function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width:
 function FreeTextQuestionView(props: { question: ActiveQuestion }): ReactElement {
   const item = props.question.item
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="blue" paddingX={1}>
-      <Text color="blue" bold>{`问 题：${item.question}`}</Text>
+    <Box flexDirection="column" borderStyle="round" borderColor={theme.info} paddingX={1}>
+      <Text color={theme.info} bold>{`问 题：${item.question}`}</Text>
       {item.detail !== undefined && item.detail !== '' && <Text dimColor>{item.detail}</Text>}
       <Text dimColor>在下方输入框中输入回答，Enter 提交</Text>
     </Box>
@@ -482,10 +472,10 @@ function TodoPanel(props: { todos: readonly { content: string; status: 'pending'
   const shown = props.todos.slice(0, 8)
   const done = props.todos.filter(todo => todo.status === 'completed').length
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
-      <Text color="yellow" bold>{`📋 任务 ${done}/${props.todos.length}`}</Text>
+    <Box flexDirection="column" borderStyle="round" borderColor={theme.warning} paddingX={1}>
+      <Text color={theme.warning} bold>{`📋 任务 ${done}/${props.todos.length}`}</Text>
       {shown.map((todo, index) => (
-        <Text key={index} color={todo.status === 'in_progress' ? 'yellow' : undefined} dimColor={todo.status === 'completed'}>
+        <Text key={index} color={todo.status === 'in_progress' ? theme.warning : undefined} dimColor={todo.status === 'completed'}>
           {`${todo.status === 'completed' ? '☑' : todo.status === 'in_progress' ? '◐' : '☐'} ${truncateLine(todo.content, props.width - 8)}`}
         </Text>
       ))}
@@ -500,7 +490,7 @@ function TodoPanel(props: { todos: readonly { content: string; status: 'pending'
  * current stance is always visible and the Shift+Tab cycle is advertised. */
 function ModeLine(props: { mode: ApprovalMode }): ReactElement {
   return props.mode === 'auto'
-    ? <Text color="yellow">⏵⏵ 自动允许模式已开启（shift+tab 切换）</Text>
+    ? <Text color={theme.warning}>⏵⏵ 自动允许模式已开启（shift+tab 切换）</Text>
     : <Text dimColor>权限模式：每次询问（shift+tab 切换自动允许）</Text>
 }
 

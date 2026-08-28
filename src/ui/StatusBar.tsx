@@ -11,6 +11,7 @@ import type { ReactElement } from 'react'
 import { Box, Text, useStdout } from 'ink'
 import stringWidth from 'string-width'
 import type { Phase } from '../store.js'
+import { theme } from './theme.js'
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
@@ -88,7 +89,7 @@ export function StatusBar(props: StatusBarProps): ReactElement {
 
   return (
     <Box>
-      <Text color={active ? 'cyan' : 'green'}>{active ? frame : '●'}</Text>
+      <Text color={active ? theme.accent : theme.success}>{active ? frame : '●'}</Text>
       <Text>{left}</Text>
       <Box flexGrow={1} />
       <Text dimColor>{right}</Text>

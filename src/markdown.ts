@@ -12,6 +12,7 @@ import { marked } from 'marked'
 import type { Token, Tokens } from 'marked'
 import stringWidth from 'string-width'
 import wrapAnsi from 'wrap-ansi'
+import { theme } from './ui/theme.js'
 
 export function renderMarkdownLines(md: string, width: number): string[] {
   const out: string[] = []
@@ -40,7 +41,7 @@ function renderBlock(token: Token, out: string[], width: number): void {
   switch (token.type) {
     case 'heading': {
       const t = token as Tokens.Heading
-      out.push(...wrap(chalk.bold.cyanBright(inline(t.tokens)), width, 0))
+      out.push(...wrap(theme.md.heading(inline(t.tokens)), width, 0))
       pushBlank(out)
       break
     }
@@ -198,18 +199,18 @@ function inline(tokens: Token[] | undefined): string {
       }
       case 'strong': s += chalk.bold(inline((t as Tokens.Strong).tokens)); break
       case 'em': s += chalk.italic(inline((t as Tokens.Em).tokens)); break
-      case 'codespan': s += chalk.yellowBright(decodeEntities((t as Tokens.Codespan).text)); break
+      case 'codespan': s += theme.md.codespan(decodeEntities((t as Tokens.Codespan).text)); break
       case 'link': {
         const lt = t as Tokens.Link
         const label = inline(lt.tokens)
-        s += chalk.cyanBright.underline(label !== '' ? label : lt.href)
+        s += theme.md.link(label !== '' ? label : lt.href)
         if (lt.href !== undefined && label !== '' && lt.href !== label) s += chalk.dim(` (${lt.href})`)
         break
       }
       case 'del': s += chalk.strikethrough(inline((t as Tokens.Del).tokens)); break
       case 'br': s += '\n'; break
       case 'escape': s += (t as Tokens.Escape).text; break
-      case 'image': s += chalk.cyan(`[图片：${(t as Tokens.Image).text ?? ''}]`); break
+      case 'image': s += theme.md.image(`[图片：${(t as Tokens.Image).text ?? ''}]`); break
       case 'html': s += chalk.dim((t as Tokens.HTML).text ?? ''); break
       default: s += 'text' in t ? String((t as { text?: string }).text ?? '') : ''
     }
@@ -219,7 +220,7 @@ function inline(tokens: Token[] | undefined): string {
 
 function safeHighlight(code: string, language: string): string {
   try {
-    return highlight(code, { language })
+    return highlight(code, { language, theme: theme.highlight })
   } catch {
     return code
   }

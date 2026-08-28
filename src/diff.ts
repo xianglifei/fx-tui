@@ -8,6 +8,7 @@
 
 import chalk from 'chalk'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
+import { theme } from './ui/theme.js'
 
 const MAX_DIFF_LINES = 200
 
@@ -21,8 +22,8 @@ export function renderFileDiff(diff: FileDiff): string[] {
   if (newLines[newLines.length - 1] === '') newLines.pop()
 
   if (diff.oldText === null) {
-    for (const line of newLines.slice(0, MAX_DIFF_LINES)) out.push(chalk.green(`+ ${line}`))
-    if (newLines.length > MAX_DIFF_LINES) out.push(chalk.greenBright(`+ …（还有 ${newLines.length - MAX_DIFF_LINES} 行）`))
+    for (const line of newLines.slice(0, MAX_DIFF_LINES)) out.push(theme.diff.add(`+ ${line}`))
+    if (newLines.length > MAX_DIFF_LINES) out.push(theme.diff.more(`+ …（还有 ${newLines.length - MAX_DIFF_LINES} 行）`))
     return out
   }
 
@@ -30,12 +31,12 @@ export function renderFileDiff(diff: FileDiff): string[] {
   let shown = 0
   for (const op of ops) {
     if (shown >= MAX_DIFF_LINES) {
-      out.push(chalk.dim(`…（差异超过 ${MAX_DIFF_LINES} 行，已截断）`))
+      out.push(theme.diff.context(`…（差异超过 ${MAX_DIFF_LINES} 行，已截断）`))
       break
     }
-    if (op.kind === 'same') out.push(chalk.dim(`  ${op.text}`))
-    else if (op.kind === 'del') out.push(chalk.red(`- ${op.text}`))
-    else out.push(chalk.green(`+ ${op.text}`))
+    if (op.kind === 'same') out.push(theme.diff.context(`  ${op.text}`))
+    else if (op.kind === 'del') out.push(theme.diff.del(`- ${op.text}`))
+    else out.push(theme.diff.add(`+ ${op.text}`))
     shown++
   }
   return out

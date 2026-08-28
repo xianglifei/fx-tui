@@ -18,8 +18,10 @@ import type { ReactElement } from 'react'
 import { Box, Text, useInput, usePaste, useStdout } from 'ink'
 import type { PendingImage, TuiStore } from '../store.js'
 import { isExistingImagePath, parsePathChunk } from '../path-drops.js'
+import { OSC11_REMNANT_RE } from '../terminal-bg.js'
 import { fuzzyMatchPaths, listWorkspaceFiles } from '../workspace-files.js'
 import { textRows } from './ink-text.js'
+import { theme } from './theme.js'
 
 export interface MenuEntry {
   readonly name: string
@@ -187,6 +189,10 @@ export function InputBox(props: InputBoxProps): ReactElement {
     // Kitty-protocol terminals report key release as a separate event; without
     // this guard every keypress would fire the handler twice.
     if (key.eventType === 'release') return
+    // A terminal's OSC 11 background probe can be answered after the startup
+    // detection window closed; ink then delivers the unknown escape sequence
+    // here as literal text, which would type junk into the editor.
+    if (OSC11_REMNANT_RE.test(input)) return
 
     // Shift+Tab cycles the approval mode (每次询问 ⇄ 自动允许). Distinct from
     // the menu's plain Tab "accept completion", so it also works while a
@@ -555,7 +561,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
         // children in ink 7's first layout pass (siblings get overlapping
         // positions and render on top of each other), while the natural
         // content height is already constant here.
-        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
+        <Box flexDirection="column" borderStyle="round" borderColor={theme.muted} paddingX={1}>
           {Array.from({ length: MENU_SLOTS }, (_, row) => {
             const entry = menu.entries[menu.scroll + row]
             if (entry === undefined) return <Text key={`blank-${row}`}>{' '}</Text>
@@ -568,13 +574,13 @@ export function InputBox(props: InputBoxProps): ReactElement {
           <Text dimColor>{menuHint(menu)}</Text>
         </Box>
       )}
-      <Box flexDirection="column" borderStyle="round" borderColor={frozen ? 'gray' : 'cyan'} paddingX={1}>
+      <Box flexDirection="column" borderStyle="round" borderColor={frozen ? theme.muted : theme.accent} paddingX={1}>
         {isEmpty && histIdx === -1 && questionFreeText && (
           <Text dimColor>输入你的回答，Enter 提交（Esc 跳过）…</Text>
         )}
         {pendingImages.length > 0 && (
           <>
-            <Text color="magenta">{`📎 已附加 ${pendingImages.length} 张图片，将随下一条消息发送`}</Text>
+            <Text color={theme.approval}>{`📎 已附加 ${pendingImages.length} 张图片，将随下一条消息发送`}</Text>
             <Text dimColor>{trayDetailText(pendingImages)}</Text>
           </>
         )}

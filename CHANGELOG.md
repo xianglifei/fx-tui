@@ -3,6 +3,33 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.14.0] - 2026-08-28
+
+### 功能：双主题配色 + 终端背景色自动检测
+
+- **动机**：此前整套 UI 按作者的浅色终端调校，使用黑/深色背景终端的用户反馈
+  部分文字看不清——根因是界面大量使用具名 ANSI 色（`gray`/`blue` 等），深色
+  终端主题会把它们重映射成低亮度色调，落在黑底上近乎隐形
+- **双主题**：新增语义化调色板层（accent/warning/success/danger/info/approval/
+  muted/userBar 等 token，`ui/theme.ts`），全仓 40+ 处内联颜色字面量全部收编；
+  浅色主题保持既有颜色**原样**（老用户视觉零变化），深色主题全部改用 hex 色
+  值——绕过终端对 ANSI 色的重映射，可读性由配色自身保证（非 truecolor 终端
+  由 chalk 自动降级），色调仍锚定品牌 ~181° 青色家族；用户消息条反转为深青底
+  浅字，代码块高亮（cli-highlight）同步换用为黑底调校的 hex 主题（默认主题的
+  蓝色关键字/绿色注释在黑底上同样看不清）
+- **自动检测（默认 auto 档）**：启动时（Ink 接管终端前）发 OSC 11 背景色查
+  询并短暂等待响应（120ms 超时，期间 stdin 临时进 raw mode、结束后原样恢
+  复），按 sRGB 相对亮度判定深浅；不响应时回退 `COLORFGBG` 环境变量约定，仍
+  测不出按浅色。iTerm2 / Terminal.app / kitty / Ghostty / VS Code / Warp /
+  Windows Terminal 等主流终端均支持 OSC 11；代价是不响应的终端启动多等约
+  120ms，探测全程 try/catch 不影响启动
+- **`/theme` 命令**：交互选择（自动检测 / 浅色 / 深色）或直给（`/theme
+  auto|light|dark`，中文别名同义）；选择持久化到 `$DSH_HOME/fx-tui-settings.json`
+  （auto 不落盘，与 autoUpdate 同约定）并立即生效——复用 resize 全量重建机
+  制（卸载重挂 + 清屏 + 全量重放转录），整个界面统一成新配色（代价同 resize：
+  scrollback 清空；重挂前清空草稿捕获，避免把已提交的命令文本回填进新输入框）。
+  `/status` 增加主题行，`/help` 与 README 命令表同步登记。版本号升至 0.14.0
+
 ## [0.13.4] - 2026-08-28
 
 ### 修复：终端窗口 resize 后排版错乱，且调回原尺寸也不可逆
