@@ -55,7 +55,7 @@ import type { MenuEntry } from './ui/Input.js'
 import { installedRoot, performSelfUpdate } from './update.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.12.0'
+export const FX_TUI_VERSION = '0.13.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000

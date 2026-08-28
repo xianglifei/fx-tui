@@ -56,17 +56,22 @@ interface EditorState {
 interface Menu {
   kind: 'commands' | 'files'
   query: string
+  /** The full filtered list — the menu scrolls, nothing is dropped here. */
   entries: readonly { label: string; description: string }[]
   index: number
+  /** First visible row of the MENU_SLOTS-tall sliding window over entries. */
+  scroll: number
 }
 
 const HELP_TEXT =
   'Enter 发送 · Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全 · Esc 中断/清空 · Ctrl+O 工具详情 · ' +
   'Ctrl+C 清空，空输入时双击退出 · /help 帮助 · /edit 外部编辑器 · /image <路径> 附加图片'
 
-const MENU_SIZE = 8
-/** Visible entry rows the menu always occupies (blank-filled while filtering). */
+/** Visible entry rows the menu always occupies; a longer filtered list scrolls
+ * through this window, a shorter one is blank-filled to keep the frame height. */
 const MENU_SLOTS = 8
+/** Cap on fuzzy @-path matches gathered for the scrollable menu; commands are uncapped. */
+const MAX_FILE_MATCHES = 60
 
 export function InputBox(props: InputBoxProps): ReactElement {
   const { store, history, frozen, questionFreeText, seed, pendingImages, listCommands, runCommand, onSubmit, onDropFiles, onInterrupt, onExit, onHeightChange } = props
@@ -75,6 +80,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
   const [draft, setDraft] = useState<string | null>(null)
   const [menu, setMenu] = useState<Menu | null>(null)
   const menuIndexRef = useRef(0)
+  const menuScrollRef = useRef(0)
   const dismissedQueryRef = useRef<string | null>(null)
   const reportedHeightRef = useRef(-1)
 
@@ -125,10 +131,11 @@ export function InputBox(props: InputBoxProps): ReactElement {
       }
       const entries = listCommands()
         .filter(entry => entry.name.toLowerCase().startsWith(query))
-        .slice(0, MENU_SIZE)
         .map(entry => ({ label: `/${entry.name}`, description: entry.description }))
       const index = Math.min(menuIndexRef.current, Math.max(0, entries.length - 1))
-      setMenu(entries.length > 0 ? { kind: 'commands', query, entries, index } : null)
+      const scroll = clampScroll(menuScrollRef.current, index, entries.length)
+      menuScrollRef.current = scroll
+      setMenu(entries.length > 0 ? { kind: 'commands', query, entries, index, scroll } : null)
       return
     }
 
@@ -143,10 +150,12 @@ export function InputBox(props: InputBoxProps): ReactElement {
       let cancelled = false
       void listWorkspaceFiles(process.cwd()).then(files => {
         if (cancelled) return
-        const entries = fuzzyMatchPaths(query, files, MENU_SIZE)
+        const entries = fuzzyMatchPaths(query, files, MAX_FILE_MATCHES)
           .map(match => ({ label: match.path, description: '' }))
         const index = Math.min(menuIndexRef.current, Math.max(0, entries.length - 1))
-        setMenu(entries.length > 0 ? { kind: 'files', query, entries, index } : null)
+        const scroll = clampScroll(menuScrollRef.current, index, entries.length)
+        menuScrollRef.current = scroll
+        setMenu(entries.length > 0 ? { kind: 'files', query, entries, index, scroll } : null)
       })
       return () => { cancelled = true }
     }
@@ -203,16 +212,17 @@ export function InputBox(props: InputBoxProps): ReactElement {
       return
     }
 
-    // Menu navigation takes the arrows, Tab, and Enter while it is open.
+    // Menu navigation takes the arrows, Tab, and Enter while it is open. The
+    // highlight walks the full filtered list; the visible window slides when
+    // the cursor would leave it.
     if (menu !== null && menu.entries.length > 0) {
-      if (key.upArrow) {
-        menuIndexRef.current = Math.max(0, menu.index - 1)
-        setMenu({ ...menu, index: menuIndexRef.current })
-        return
-      }
-      if (key.downArrow) {
-        menuIndexRef.current = Math.min(menu.entries.length - 1, menu.index + 1)
-        setMenu({ ...menu, index: menuIndexRef.current })
+      if (key.upArrow || key.downArrow) {
+        const index = key.upArrow
+          ? Math.max(0, menu.index - 1)
+          : Math.min(menu.entries.length - 1, menu.index + 1)
+        menuIndexRef.current = index
+        menuScrollRef.current = clampScroll(menu.scroll, index, menu.entries.length)
+        setMenu({ ...menu, index, scroll: menuScrollRef.current })
         return
       }
       if (key.tab) {
@@ -226,6 +236,14 @@ export function InputBox(props: InputBoxProps): ReactElement {
           setEd({ lines: [''], row: 0, col: 0 })
           setHistIdx(-1)
           setDraft(null)
+          // Close in the same batch as the command's store update: the menu's
+          // 11 rows must not share a frame with the panel/notice the command
+          // just added — that frame overflows the viewport, the terminal
+          // scrolls, and ink's incremental renderer never re-syncs its cursor
+          // model, leaving the input box stranded above the bottom row.
+          setMenu(null)
+          menuIndexRef.current = 0
+          menuScrollRef.current = 0
         } else {
           applyMenuCompletion(menu.entries[menu.index]!.label)
         }
@@ -513,20 +531,24 @@ export function InputBox(props: InputBoxProps): ReactElement {
   return (
     <Box flexDirection="column">
       {menu !== null && menu.entries.length > 0 && (
-        // Fixed height: filtering swaps entries for blank slots instead of
-        // resizing, so the frame height never changes while typing and the
-        // input box stays pinned to the bottom row.
-        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} height={MENU_SLOTS + 1}>
-          {Array.from({ length: MENU_SLOTS }, (_, index) => {
-            const entry = menu.entries[index]
-            if (entry === undefined) return <Text key={`blank-${index}`}>{' '}</Text>
+        // The pane always renders MENU_SLOTS slot rows (blank-filled) plus the
+        // hint row, so its height stays constant while filtering and the input
+        // box stays pinned to the bottom row. Deliberately NOT set via the
+        // `height` style: a fixed-height column box mis-measures its text
+        // children in ink 7's first layout pass (siblings get overlapping
+        // positions and render on top of each other), while the natural
+        // content height is already constant here.
+        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
+          {Array.from({ length: MENU_SLOTS }, (_, row) => {
+            const entry = menu.entries[menu.scroll + row]
+            if (entry === undefined) return <Text key={`blank-${row}`}>{' '}</Text>
             return (
-              <Text key={entry.label} inverse={index === menu.index}>
+              <Text key={entry.label} inverse={menu.scroll + row === menu.index}>
                 {`${entry.label}${entry.description !== '' ? `  ${entry.description}` : ''}`}
               </Text>
             )
           })}
-          <Text dimColor>↑↓ 选择 · Tab 补全 · Enter {menu.kind === 'commands' ? '执行' : '补全'} · Esc 关闭</Text>
+          <Text dimColor>{menuHint(menu)}</Text>
         </Box>
       )}
       <Box flexDirection="column" borderStyle="round" borderColor={frozen ? 'gray' : 'cyan'} paddingX={1}>
@@ -556,6 +578,27 @@ function seedToState(seed: string | undefined): EditorState {
   const lines = seed.split('\n')
   const last = lines[lines.length - 1] ?? ''
   return { lines, row: lines.length - 1, col: Array.from(last).length }
+}
+
+/**
+ * Clamp a window offset so it stays inside the list and the highlighted row
+ * stays visible. Sliding only happens at the window edges — an in-window move
+ * keeps the offset (and the whole pane) perfectly still.
+ */
+function clampScroll(scroll: number, index: number, length: number): number {
+  let at = Math.min(Math.max(0, scroll), Math.max(0, length - MENU_SLOTS))
+  if (index < at) at = index
+  if (index >= at + MENU_SLOTS) at = index - MENU_SLOTS + 1
+  return at
+}
+
+/** One-row menu footer; prepends the window position when the filtered list
+ * outgrows the visible slots, without adding a row to the fixed-height pane. */
+function menuHint(menu: Menu): string {
+  const position = menu.entries.length > MENU_SLOTS
+    ? `第 ${menu.index + 1}/${menu.entries.length} 项 · `
+    : ''
+  return `${position}↑↓ 选择 · Tab 补全 · Enter ${menu.kind === 'commands' ? '执行' : '补全'} · Esc 关闭`
 }
 
 /** Names of the queued images in the attachment tray; shared by the render and
