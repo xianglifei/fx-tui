@@ -35,6 +35,9 @@ export interface InputBoxProps {
   questionFreeText: boolean
   /** Initial editor content (used when re-mounting after the external editor). */
   seed?: string
+  /** Full editor state (text + cursor) captured from a previous mount; takes
+   * precedence over `seed` when a resize rebuild must not lose the draft. */
+  restore?: EditorState
   pendingImages: readonly PendingImage[]
   listCommands(): readonly MenuEntry[]
   runCommand(line: string): void
@@ -47,11 +50,19 @@ export interface InputBoxProps {
   onHeightChange?: (rows: number) => void
 }
 
-interface EditorState {
+export interface EditorState {
   lines: string[]
   row: number
   col: number
 }
+
+/**
+ * The live editor state of the currently mounted InputBox, updated on every
+ * render. A resize rebuild unmounts and remounts the whole Ink tree, so the
+ * in-progress draft can only survive through this module-level handoff —
+ * same pattern as the splash-filler height caches.
+ */
+export const draftCapture: { state: EditorState | null } = { state: null }
 
 interface Menu {
   kind: 'commands' | 'files'
@@ -74,8 +85,8 @@ const MENU_SLOTS = 8
 const MAX_FILE_MATCHES = 60
 
 export function InputBox(props: InputBoxProps): ReactElement {
-  const { store, history, frozen, questionFreeText, seed, pendingImages, listCommands, runCommand, onSubmit, onDropFiles, onInterrupt, onExit, onHeightChange } = props
-  const [ed, setEd] = useState<EditorState>(() => seedToState(seed))
+  const { store, history, frozen, questionFreeText, seed, restore, pendingImages, listCommands, runCommand, onSubmit, onDropFiles, onInterrupt, onExit, onHeightChange } = props
+  const [ed, setEd] = useState<EditorState>(() => restore ?? seedToState(seed))
   const [histIdx, setHistIdx] = useState(-1)
   const [draft, setDraft] = useState<string | null>(null)
   const [menu, setMenu] = useState<Menu | null>(null)
@@ -109,6 +120,12 @@ export function InputBox(props: InputBoxProps): ReactElement {
       reportedHeightRef.current = h
       onHeightChange?.(h)
     }
+  })
+
+  // Mirror the live editor state into the module-level capture on every render
+  // so a resize rebuild can remount with the draft (and cursor) intact.
+  useLayoutEffect(() => {
+    draftCapture.state = ed
   })
 
   // -- Completion menu derivation -------------------------------------------
@@ -606,6 +623,7 @@ function menuHint(menu: Menu): string {
 function trayDetailText(images: readonly PendingImage[]): string {
   return images.map(image => image.label).join(' · ')
 }
+export { trayDetailText }
 
 /** Pure splice of multi-line text into an editor state at its cursor. */
 function spliceInto(ed: EditorState, body: string): EditorState {

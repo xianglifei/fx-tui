@@ -51,14 +51,19 @@ import { TuiStore } from './store.js'
 import type { ApprovalMode, ToolPresenter } from './store.js'
 import { blocksToTextOf, formatToolArgs, toolResultCallIdOf, toolResultTextOf } from './store.js'
 import { App } from './ui/App.js'
+import { draftCapture, trayDetailText } from './ui/Input.js'
 import type { MenuEntry } from './ui/Input.js'
+import { textRows } from './ui/ink-text.js'
 import { installedRoot, performSelfUpdate } from './update.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.13.3'
+export const FX_TUI_VERSION = '0.13.4'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
+
+/** Quiet gap after the last resize event before the rebuild remount fires. */
+const RESIZE_DEBOUNCE_MS = 300
 
 /** Stable Cordis plugin name. */
 export const name = 'fx-tui-runner'
@@ -763,6 +768,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
   }
 
 async function shutdown(): Promise<void> {
+  detachResizeRebuild()
   instance?.unmount()
   store.dispose()
   if (agent.status === 'running') {
@@ -810,6 +816,20 @@ function wipeViewport(): void {
   const out = process.stdout
   if (out.isTTY === true) {
     out.write('\x1b[2J')
+  }
+}
+
+/**
+ * Drop the entire scrollback buffer (ESC[3J). Resize rebuilds replay the
+ * whole transcript as the sole copy of history, which requires the old
+ * reflowed rows above the viewport to be gone — any survivor becomes a
+ * duplicated seam. Unlike the launch path (which keeps pre-launch shell
+ * history), the rebuild sacrifices it for a guaranteed-clean transcript.
+ */
+function wipeScrollback(): void {
+  const out = process.stdout
+  if (out.isTTY === true) {
+    out.write('\x1b[3J')
   }
 }
 
@@ -873,6 +893,110 @@ function bottomFlush(): void {
 
   store.start()
 
+  // -- Terminal resize rebuild -------------------------------------------------
+  //
+  // Ink commits settled transcript rows once through <Static> and never
+  // revisits them; when the terminal reflows on resize, every on-screen line
+  // moves while Ink's row accounting for its own frame stays where it was, so
+  // redraws erase and repaint at stale offsets — and nothing repairs itself
+  // when the window is restored, because the reflowed rows are already the
+  // buffer's truth. The only reliable recovery is to unmount, reset the
+  // terminal, and mount a fresh tree at the new size.
+  //
+  // Replay scope: EVERYTHING, with ESC[3J clearing the scrollback first.
+  // Any scheme that replays only a tail against the surviving scrollback
+  // needs a seam between the old reflowed copy and the fresh render — and no
+  // estimator is exact enough to align them row-for-row: replay short of the
+  // seam duplicates the head, overshooting it duplicates middle rows (the
+  // user saw the same message three times). Wiping the scrollback removes the
+  // old copy entirely, so the fresh render is the ONLY copy: rows beyond the
+  // viewport scroll into an empty scrollback as its seamless continuation.
+  // The price is pre-launch shell history above the transcript, which resize
+  // gives up in exchange for a guaranteed-clean transcript.
+  // The in-progress draft survives via draftCapture, handed to the new mount
+  // as `restore`. Debounced because dragging a window fires resize events in
+  // a burst; only the final size matters.
+  let mountedCols = process.stdout.columns
+  let mountedRows = process.stdout.rows
+  let rebuildTimer: ReturnType<typeof setTimeout> | null = null
+  let rebuilding = false
+  let rebuildQueued = false
+
+  const scheduleRebuild = (): void => {
+    if (rebuildTimer !== null) clearTimeout(rebuildTimer)
+    rebuildTimer = setTimeout(() => {
+      rebuildTimer = null
+      void remountAtCurrentSize()
+    }, RESIZE_DEBOUNCE_MS)
+  }
+
+  const remountAtCurrentSize = async (): Promise<void> => {
+    const out = process.stdout
+    if (out.columns === mountedCols && out.rows === mountedRows) return
+    if (rebuilding) {
+      rebuildQueued = true
+      return
+    }
+    rebuilding = true
+    try {
+      instance?.unmount()
+      try {
+        await instance?.waitUntilExit()
+      } catch { /* unmount already settled */ }
+      wipeViewport()
+      wipeScrollback()
+      homeCursor()
+      mountedCols = out.columns
+      mountedRows = out.rows
+      // Exact first-frame editor height: the default estimate (empty editor)
+      // would under-count a restored multi-line draft or the image tray; a
+      // first frame taller than the viewport would push the banner's top edge
+      // out of view instead of pinning it to the viewport top.
+      const restore = draftCapture.state ?? undefined
+      const inner = Math.max(8, out.columns - 4)
+      const pendingImages = store.getSnapshot().pendingImages
+      const initialInputHeight = 2 +
+        (restore !== undefined
+          ? restore.lines.reduce((n, line) => n + textRows(line === '' ? ' ' : line, inner), 0)
+          : 1) +
+        (pendingImages.length > 0
+          ? textRows(`📎 已附加 ${pendingImages.length} 张图片，将随下一条消息发送`, inner) +
+            textRows(trayDetailText(pendingImages), inner)
+          : 0)
+      instance = render(
+        createElement(App, {
+          store,
+          history,
+          actions,
+          listCommands,
+          restore,
+          rebuilding: true,
+          initialInputHeight,
+        }),
+        { exitOnCtrlC: false, incrementalRendering: true },
+      )
+      store.start()
+    } finally {
+      rebuilding = false
+      if (rebuildQueued) {
+        rebuildQueued = false
+        scheduleRebuild()
+      }
+    }
+  }
+
+  const detachResizeRebuild = (): void => {
+    if (rebuildTimer !== null) {
+      clearTimeout(rebuildTimer)
+      rebuildTimer = null
+    }
+    process.stdout.off('resize', scheduleRebuild)
+  }
+
+  if (process.stdout.isTTY === true) {
+    process.stdout.on('resize', scheduleRebuild)
+  }
+
   // Background self-update, deep enough into the session that startup imports
   // have settled; .unref() keeps the pending timer from delaying process exit.
   setTimeout(() => {
@@ -890,6 +1014,7 @@ function bottomFlush(): void {
   }, AUTO_UPDATE_DELAY_MS).unref()
 
   ctx.effect(() => () => {
+    detachResizeRebuild()
     store.dispose()
     instance?.unmount()
   })
