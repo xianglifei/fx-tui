@@ -63,7 +63,7 @@ import type { GhosttyThemeId } from './ui/ghostty-themes.js'
 import { installedRoot, performSelfUpdate } from './update.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.16.0'
+export const FX_TUI_VERSION = '0.16.1'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
@@ -88,7 +88,7 @@ const USAGE = `fx-tui v${FX_TUI_VERSION} — DeepSeek Harness 的交互式终端
 
 按键：Enter 发送 · Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全 · Shift+Tab 权限模式 · Esc 中断 · Ctrl+O 工具详情 · Ctrl+C 清空/双击退出
 
-命令与技能：输入 / 弹出补全菜单（上半是命令，往下是技能分组，随输入实时筛选）；
+命令与技能：输入 / 弹出补全菜单（「命令」与「技能」双分组标题，随输入实时筛选）；
 选中技能插入 /技能名 手势，回车发送后模型自动加载该技能（也可在消息中直接写 /技能名）。
 `
 

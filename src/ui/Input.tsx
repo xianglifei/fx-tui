@@ -20,6 +20,7 @@ import type { PendingImage, TuiStore } from '../store.js'
 import { isExistingImagePath, parsePathChunk } from '../path-drops.js'
 import { OSC11_REMNANT_RE } from '../terminal-bg.js'
 import { fuzzyMatchPaths, listWorkspaceFiles } from '../workspace-files.js'
+import { truncateLine } from './estimate.js'
 import { textRows } from './ink-text.js'
 import { theme } from './theme.js'
 
@@ -92,6 +93,10 @@ const HELP_TEXT =
 const MENU_SLOTS = 8
 /** Cap on fuzzy @-path matches gathered for the scrollable menu; commands are uncapped. */
 const MAX_FILE_MATCHES = 60
+/** Display-column cap on menu descriptions: long skill summaries stay a
+ * one-line teaser. The pane's fixed height assumes one row per entry, so an
+ * uncapped description could wrap and corrupt the slot budget. */
+const MENU_DESC_COLUMNS = 40
 
 export function InputBox(props: InputBoxProps): ReactElement {
   const { store, history, frozen, questionFreeText, seed, restore, pendingImages, listCommands, runCommand, onSubmit, onDropFiles, onInterrupt, onExit, onHeightChange } = props
@@ -162,14 +167,17 @@ export function InputBox(props: InputBoxProps): ReactElement {
         const row: MenuRow = {
           type: 'entry',
           label: `/${entry.name}`,
-          description: entry.description,
+          description: truncateLine(entry.description, MENU_DESC_COLUMNS),
           skill: entry.kind === 'skill',
         }
         ;(entry.kind === 'skill' ? skills : commands).push(row)
       }
-      const rows: readonly MenuRow[] = skills.length > 0
-        ? [...commands, { type: 'header', label: '技能' }, ...skills]
-        : commands
+      // Both groups carry an explicit header; a group the filter emptied out
+      // disappears together with its header.
+      const rows: readonly MenuRow[] = [
+        ...(commands.length > 0 ? [{ type: 'header' as const, label: '命令' }, ...commands] : []),
+        ...(skills.length > 0 ? [{ type: 'header' as const, label: '技能' }, ...skills] : []),
+      ]
       if (rows.length === 0) {
         setMenu(null)
         return
