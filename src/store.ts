@@ -307,11 +307,18 @@ export class TuiStore {
       case 'assistant/message': {
         this.streamBuf = ''
         this.streamText = ''
-        this.items.push({
-          kind: 'assistant',
-          text: blocksToText(ev.data.message.content),
-          interrupted: ev.data.interrupted === true,
-        })
+        const text = blocksToText(ev.data.message.content)
+        // Tool-only rounds carry no text: the message that holds the tool_use
+        // blocks would otherwise become a blank transcript item rendering two
+        // empty rows between consecutive tool cards. Keep interrupted pushes —
+        // they carry the visible truncation notice.
+        if (text.trim() !== '' || ev.data.interrupted === true) {
+          this.items.push({
+            kind: 'assistant',
+            text,
+            interrupted: ev.data.interrupted === true,
+          })
+        }
         if (ev.data.usage !== undefined) this.usage = formatUsage(ev.data.usage)
         this.phase = 'thinking'
         this.phaseDetail = ''

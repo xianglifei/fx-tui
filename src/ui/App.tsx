@@ -212,7 +212,15 @@ function FinalItemView(props: { item: FinalItem; width: number }): ReactElement 
         </Box>
       )
     case 'tool':
-      return <ToolCardView item={item} width={width} />
+      // Lead gap keeps the transcript's uniform one-blank-row rhythm; without
+      // it adjacent cards sit border-to-border once the store stops emitting
+      // the blank assistant items that used to space them apart.
+      return (
+        <Box flexDirection="column">
+          <LeadGap />
+          <ToolCardView item={item} width={width} />
+        </Box>
+      )
     case 'notice':
       return (
         <Text
@@ -552,7 +560,8 @@ function estimateItemHeight(item: FinalItem, width: number, columns: number): nu
       return 2 + textRows(item.title, columns - 4) +
         item.lines.reduce((n, line) => n + textRows(line, columns - 4), 0)
     case 'tool':
-      return estimateToolCardHeight(item, width, columns)
+      // +1 lead gap row, mirroring ToolCardView's wrapper.
+      return 1 + estimateToolCardHeight(item, width, columns)
   }
 }
 
