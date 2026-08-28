@@ -123,12 +123,20 @@ function renderTable(table: Tokens.Table, out: string[], width: number): void {
   const rows = table.rows.map(row => row.map(cell => cellText(cell)))
   const columns = headers.length
   if (columns === 0) return
-  const widths: number[] = []
+  // Natural width of each column is the widest cell (header included),
+  // measured in display columns — .length would count a CJK char as 1 and
+  // desync the rule line from the cells it separates.
+  const natural: number[] = []
   for (let c = 0; c < columns; c++) {
-    let w = stripAnsi(headers[c] ?? '').length
-    for (const row of rows) w = Math.max(w, stripAnsi(row[c] ?? '').length)
-    widths.push(Math.min(w, 24))
+    let w = stringWidth(stripAnsi(headers[c] ?? ''))
+    for (const row of rows) w = Math.max(w, stringWidth(stripAnsi(row[c] ?? '')))
+    natural.push(w)
   }
+  // Columns keep natural width whenever the table fits the surrounding wrap
+  // budget; only genuine overflow shrinks anything, so the common case
+  // renders cell text in full.
+  const budget = Math.max(12, width) - (columns - 1) * 3
+  const widths = fitWidths(natural, budget)
   const renderRow = (cells: string[], header: boolean): void => {
     const parts: string[] = []
     for (let c = 0; c < columns; c++) {
@@ -143,8 +151,39 @@ function renderTable(table: Tokens.Table, out: string[], width: number): void {
 }
 
 function cellText(cell: Tokens.TableCell): string {
-  if (Array.isArray(cell.tokens)) return inline(cell.tokens)
-  return decodeEntities(cell.text ?? '')
+  const text = Array.isArray(cell.tokens) ? inline(cell.tokens) : decodeEntities(cell.text ?? '')
+  // A cell must occupy exactly one terminal line; <br> in markdown would
+  // otherwise smuggle a raw newline into the padded row.
+  return text.replace(/\n/g, ' ')
+}
+
+/** Overflow comes off the widest columns first so short cells keep their full
+ * content; columns stay at TABLE_MIN_COL unless the budget cannot even hold
+ * every column at that floor, in which case layout integrity wins and columns
+ * go as low as 1 (cells collapse to '…'). */
+const TABLE_MIN_COL = 4
+
+function fitWidths(natural: number[], budget: number): number[] {
+  const widths = natural.map(w => Math.min(w, Math.max(TABLE_MIN_COL, budget)))
+  for (const floor of [TABLE_MIN_COL, 1]) {
+    let total = widths.reduce((a, b) => a + b, 0)
+    while (total > budget) {
+      let target = -1
+      let widest = floor
+      for (let c = 0; c < widths.length; c++) {
+        const w = widths[c] ?? floor
+        if (w > widest) {
+          widest = w
+          target = c
+        }
+      }
+      if (target === -1) break
+      widths[target] = (widths[target] ?? floor) - 1
+      total -= 1
+    }
+    if (total <= budget) break
+  }
+  return widths
 }
 
 function inline(tokens: Token[] | undefined): string {
@@ -210,5 +249,16 @@ function stripAnsi(text: string): string {
 
 function cellPad(text: string, width: number): string {
   const w = stringWidth(text)
-  return w >= width ? text.slice(0, width) : text + ' '.repeat(width - w)
+  if (w <= width) return text + ' '.repeat(width - w)
+  // Truncated cell: cut to the column's display width with a trailing '…',
+  // padding the remainder so every cell still ends on the same column.
+  let out = ''
+  let used = 0
+  for (const ch of text) {
+    const cw = stringWidth(ch)
+    if (used + cw > width - 1) break
+    out += ch
+    used += cw
+  }
+  return out + '…' + ' '.repeat(Math.max(0, width - used - 1))
 }
