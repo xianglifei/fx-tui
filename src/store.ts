@@ -805,7 +805,7 @@ function truncate(text: string, limit: number): string {
 function formatUsage(usage: TokenUsage): string {
   let text = `↑${formatCount(usage.inputTokens)} ↓${formatCount(usage.outputTokens)}`
   if (usage.cacheReadTokens !== undefined && usage.cacheReadTokens > 0) {
-    text += ` · 缓存↑${formatCount(usage.cacheReadTokens)}`
+    text += ` · 缓存 ${formatCount(usage.cacheReadTokens)}`
   }
   return text
 }

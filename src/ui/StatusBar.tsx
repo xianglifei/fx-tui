@@ -102,11 +102,11 @@ function formatCount(n: number): string {
   return String(n)
 }
 
-/** Context water-level text like `上下文 45%·58k/128k`; empty before any measurement. */
+/** Context water-level text like `上下文 45% (58k/128k)`; empty before any measurement. */
 function contextText(tokens: number, window: number | undefined): string {
   if (tokens <= 0) return ''
   const used = formatCount(tokens)
   if (window === undefined || window <= 0) return `上下文 ~${used}`
   const percent = Math.round((tokens / window) * 100)
-  return `上下文 ${percent}%·${used}/${formatCount(window)}`
+  return `上下文 ${percent}% (${used}/${formatCount(window)})`
 }
