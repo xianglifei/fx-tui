@@ -6,6 +6,11 @@
 
 ## 安装
 
+> **平台说明**：fx-tui 目前**仅在 macOS 上开发和验证**，暂不支持 Windows
+> （适配已完成前期调研并暂缓，研究笔记存档于
+> [docs/windows-support-notes.md](docs/windows-support-notes.md)，重启适配时以此为准）。
+> Windows 用户可先用 dsh 上游自带的 Web UI（`dsh web`）。
+
 把下面这句话复制给任意终端编码 agent（Claude Code、ZCode 等），它会读取安装指南、自动装好并验证：
 
 ```text
