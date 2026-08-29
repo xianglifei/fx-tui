@@ -25,14 +25,19 @@ import { renderMarkdownLines } from '../markdown.js'
 import { BANNER_BOX_HEIGHT, WelcomeBanner } from './Banner.js'
 import { estimateApprovalHeight, estimateItemHeight, estimateQuestionHeight, formatElapsed, truncateLine, userBarRows } from './estimate.js'
 import { InputBox } from './Input.js'
+import type { SubmitOptions } from './Input.js'
 import { StatusBar } from './StatusBar.js'
 import { theme } from './theme.js'
 
 export interface AppActions {
-  onSubmit(text: string): void
+  onSubmit(text: string, opts?: SubmitOptions): void
   runCommand(line: string): void
   /** Attaches image paths extracted from a terminal file-drop. */
   onDroppedFiles(paths: readonly string[]): void
+  /** Attaches a clipboard image (PNG bytes + display name). */
+  onClipboardImage(data: Uint8Array, name: string): void
+  /** Recalls the newest unclaimed message into the editor; null when none pending. */
+  onRecallPending(): string | null
   onInterrupt(): void
   onExit(): void
 }
@@ -122,11 +127,11 @@ export function App(props: AppProps): ReactElement {
           <Box flexDirection="column">
             {snap.queuedMessages.slice(0, 5).map((message, index) => (
               <Text key={message.id} color={theme.warning} dimColor>
-                {`⏳ 已排队${snap.queuedMessages.length > 1 ? `（${index + 1}/${snap.queuedMessages.length}）` : ''}：${truncateLine(message.text, width - 12)}`}
+                {`${message.mode === 'steer' ? '🧭 已注入（下一步生效）' : '⏳ 已排队（下一轮生效）'}${snap.queuedMessages.length > 1 ? `（${index + 1}/${snap.queuedMessages.length}）` : ''}：${truncateLine(message.text, width - 12)}`}
               </Text>
             ))}
             {snap.queuedMessages.length > 5 && (
-              <Text color={theme.warning} dimColor>{`…（还有 ${snap.queuedMessages.length - 5} 条排队消息）`}</Text>
+              <Text color={theme.warning} dimColor>{`…（还有 ${snap.queuedMessages.length - 5} 条消息，Alt+↑ 取回最后一条）`}</Text>
             )}
           </Box>
         )}
@@ -138,6 +143,7 @@ export function App(props: AppProps): ReactElement {
           contextTokens={snap.contextTokens}
           contextWindow={snap.contextWindow}
           childAgents={snap.childAgents}
+          effortLabel={snap.effortLabel}
         />
         <InputBox
           store={props.store}
@@ -150,6 +156,8 @@ export function App(props: AppProps): ReactElement {
           listCommands={props.listCommands}
           runCommand={props.actions.runCommand}
           onSubmit={props.actions.onSubmit}
+          onRecallPending={props.actions.onRecallPending}
+          onClipboardImage={props.actions.onClipboardImage}
           onDropFiles={props.actions.onDroppedFiles}
           onInterrupt={props.actions.onInterrupt}
           onExit={props.actions.onExit}

@@ -16,29 +16,31 @@ import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { tmpdir } from 'node:os'
-import { basename, resolve } from 'node:path'
+import { tmpdir, homedir } from 'node:os'
+import { basename, join, resolve } from 'node:path'
 import { createElement } from 'react'
 import { render } from 'ink'
 import type { Instance } from 'ink'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, MessageId } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 // Declaration-merge carriers: importing these types registers the ctx keys and
 // events we consume (agents, agentDefaultModel, sessions, session/event,
-// approval/request, userQuestions, tokenMeter, cmdlineArgs, appExit, skills,
-// skills/change).
+// approval/request, userQuestions, tokenMeter, compaction, sessionTitle,
+// cmdlineArgs, appExit, skills, skills/change).
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import type {} from '@deepseek-ai/dsh-commands'
+import type {} from '@deepseek-ai/dsh-compaction'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-query'
+import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type {} from '@deepseek-ai/dsh-tools'
@@ -53,23 +55,31 @@ import { TuiStore } from './store.js'
 import type { ApprovalMode, ToolPresenter } from './store.js'
 import { blocksToTextOf, formatToolArgs, toolResultCallIdOf, toolResultTextOf } from './store.js'
 import { detectTerminalBackground } from './terminal-bg.js'
+import { InputHistory } from './history.js'
+import { NOTIFY_MIN_TURN_MS, notifyTurnComplete, notifyModeLabel } from './notify.js'
+import type { NotifyMode } from './notify.js'
 import { App } from './ui/App.js'
 import { draftCapture, trayDetailText } from './ui/Input.js'
 import type { MenuEntry } from './ui/Input.js'
 import { textRows } from './ui/ink-text.js'
+import { truncateLine } from './ui/estimate.js'
+import { renderMarkdownLines } from './markdown.js'
 import { activeThemeName, resolveTheme, setActiveTheme, themeDisplayLabel, GHOSTTY_PICKER_ENTRIES } from './ui/theme.js'
 import type { ThemeName, ThemeSetting } from './ui/theme.js'
 import type { GhosttyThemeId } from './ui/ghostty-themes.js'
 import { installedRoot, performSelfUpdate } from './update.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.16.1'
+export const FX_TUI_VERSION = '0.17.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
 
 /** Quiet gap after the last resize event before the rebuild remount fires. */
 const RESIZE_DEBOUNCE_MS = 300
+
+/** Auto-compaction engages above this context ratio (when enabled via /config). */
+const AUTO_COMPACT_RATIO = 0.85
 
 /** Stable Cordis plugin name. */
 export const name = 'fx-tui-runner'
@@ -86,7 +96,8 @@ const USAGE = `fx-tui v${FX_TUI_VERSION} — DeepSeek Harness 的交互式终端
   -h, --help             显示帮助
   -v, --version          显示版本
 
-按键：Enter 发送 · Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全 · Shift+Tab 权限模式 · Esc 中断 · Ctrl+O 工具详情 · Ctrl+C 清空/双击退出
+按键：Enter 发送（运行中＝注入当前轮）· Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全或运行中排队 ·
+Alt+↑ 取回消息 · Ctrl+V 粘贴文本/图片 · Shift+Tab 权限模式 · Esc 中断 · Ctrl+O 工具详情 · Ctrl+C 清空/双击退出
 
 命令与技能：输入 / 弹出补全菜单（「命令」与「技能」双分组标题，随输入实时筛选）；
 选中技能插入 /技能名 手势，回车发送后模型自动加载该技能（也可在消息中直接写 /技能名）。
@@ -205,6 +216,15 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
   let detectedTheme: ThemeName | null = null
   const store = new TuiStore(agent.id, modelLabel(), presenter, settings.approvalMode)
   const memory = new ApprovalMemory(process.env.DSH_HOME)
+  // Persistent input history (↑/↓ browse): the live array is handed to the
+  // editor by reference, pushes need no React notification path.
+  const inputHistory = new InputHistory(process.env.DSH_HOME)
+  const history: readonly string[] = inputHistory.entries
+  // Long-turn completion tracking (turn/start → turn/end) and opt-in
+  // auto-compaction bookkeeping.
+  let turnStartedAt: number | null = null
+  let autoCompactTried = false
+  let autoCompacting = false
   store.addBanner({
     fxVersion: FX_TUI_VERSION,
     dshVersion: readDshVersion(),
@@ -233,6 +253,18 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     if (session.id !== agent.session.id) return
     debugLog('event', event.type)
     store.onEvent(event)
+    // Long-turn completion notification: measured turn/start → turn/end, so
+    // back-to-back turns each announce themselves; aborted turns are the ones
+    // the user is present for.
+    if (event.type === 'turn/start') {
+      turnStartedAt = event.time
+    } else if (event.type === 'turn/end') {
+      const elapsed = turnStartedAt !== null ? Math.max(0, event.time - turnStartedAt) : 0
+      turnStartedAt = null
+      if (elapsed >= NOTIFY_MIN_TURN_MS && event.data.reason.kind !== 'aborted') {
+        notifyTurnComplete(settings.notify, event.data.reason.kind !== 'error', elapsed)
+      }
+    }
     // Refresh context pressure once per completed step: the meter is O(surface)
     // and the next request's size is what the user cares about.
     if (event.type === 'assistant/message' || event.type === 'turn/end') {
@@ -244,6 +276,53 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
       }
     }
   })
+
+  // Auto-compaction (opt-in via /config): fires when the agent reaches idle
+  // with the context water level above AUTO_COMPACT_RATIO. One attempt per
+  // high-pressure episode — the flag re-arms once compaction (or a manual
+  // /compact) drops the level back below the threshold.
+  ctx.on('agent/status', payload => {
+    if (payload.agent.id !== agent.id || payload.status !== 'idle') return
+    const snapshot = store.getSnapshot()
+    if (snapshot.contextWindow === undefined || snapshot.contextWindow <= 0) return
+    const ratio = snapshot.contextTokens / snapshot.contextWindow
+    if (ratio < AUTO_COMPACT_RATIO) {
+      autoCompactTried = false
+      return
+    }
+    if (autoCompactTried) return
+    autoCompactTried = true
+    void maybeAutoCompact()
+  })
+
+  /** Pressure-triggered history compaction through the kernel engine; runs
+   * from true idle so the durable lock is free. Failure paths surface as
+   * notices — the turn loop itself is never affected. */
+  async function maybeAutoCompact(): Promise<void> {
+    if (!settings.autoCompact || autoCompacting || agent.status !== 'idle') return
+    const compaction = ctx.get('compaction')
+    if (compaction === undefined) return
+    autoCompacting = true
+    try {
+      store.addNotice('上下文水位较高：正在自动压缩历史（/config autocompact off 可关闭）')
+      const result = await compaction.compactIfNeeded(agent, 'pressure', new AbortController().signal)
+      if (result === null) {
+        store.addNotice('自动压缩：内核判断当前没有可安全压缩的区间（可手动 /compact）', 'warn')
+        return
+      }
+      const meter = ctx.get('tokenMeter')
+      if (meter !== undefined) {
+        try {
+          store.setContextPressure(meter.measure(agent.session).totalTokens)
+        } catch { /* metering is display-only */ }
+      }
+      store.addNotice('✅ 已自动压缩历史上下文')
+    } catch (error) {
+      store.addNotice(`自动压缩失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+    } finally {
+      autoCompacting = false
+    }
+  }
 
   ctx.on('approval/request', async (req, next) => {
     if (req.agent.id !== agent.id) return next()
@@ -282,7 +361,6 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
   })
   ctx.effect(() => () => { unregisterQuestions() })
 
-  const history: string[] = []
   let instance: Instance | null = null
 
   // -- Slash commands ---------------------------------------------------------
@@ -290,9 +368,14 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
   const builtinCommands: readonly MenuEntry[] = [
     { name: 'help', description: '查看按键与命令帮助', kind: 'builtin' },
     { name: 'status', description: '查看运行状态与插件树', kind: 'builtin' },
-    { name: 'sessions', description: '切换到另一个会话', kind: 'builtin' },
+    { name: 'sessions', description: '切换会话（可带关键词过滤）', kind: 'builtin' },
+    { name: 'rename', description: '重命名当前会话', kind: 'builtin' },
     { name: 'model', description: '切换模型 / provider', kind: 'builtin' },
-    { name: 'config', description: '查看 / 修改设置（权限模式、自动更新）', kind: 'builtin' },
+    { name: 'effort', description: '切换推理强度档位', kind: 'builtin' },
+    { name: 'btw', description: '侧问：复用上下文单轮提问，不打断主任务', kind: 'builtin' },
+    { name: 'context', description: '查看上下文水位与组成明细', kind: 'builtin' },
+    { name: 'doctor', description: '环境自检（Node/路由/密钥/终端）', kind: 'builtin' },
+    { name: 'config', description: '查看 / 修改设置（权限、更新、通知、自动压缩）', kind: 'builtin' },
     { name: 'theme', description: '切换配色主题：自动 / 浅色 / 深色 / Ghostty 精选', kind: 'builtin' },
     { name: 'export', description: '导出当前会话为 Markdown', kind: 'builtin' },
     { name: 'edit', description: '用 $EDITOR 编写长消息', kind: 'builtin' },
@@ -335,6 +418,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
       void refreshSkills()
       childAgents.clear()
       syncChildCount()
+      autoCompactTried = false
       store.reset(agent.id, modelLabel(), agent.session.events)
       store.addNotice(`已切换到会话 ${agent.id}`)
     } catch (error) {
@@ -342,7 +426,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     }
   }
 
-  async function listSessionChoices(): Promise<void> {
+  async function listSessionChoices(query: string): Promise<void> {
     let records
     try {
       records = await ctx.sessionQuery.listSessions()
@@ -350,24 +434,49 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
       store.addNotice(`读取会话列表失败：${error instanceof Error ? error.message : String(error)}`, 'error')
       return
     }
-    const choices = records
-      .filter(record => !record.header.parentSession && record.header.origin !== 'subagent')
-      .slice(0, 9)
-      .map(record => {
-        const created = new Date(record.header.createdAt)
-        const stamp = `${created.getMonth() + 1}-${created.getDate()} ${String(created.getHours()).padStart(2, '0')}:${String(created.getMinutes()).padStart(2, '0')}`
-        const dir = record.header.cwd !== undefined ? basename(record.header.cwd) : '?'
-        return {
-          label: `${stamp} · ${dir}${record.live ? ' · 运行中' : ''}`,
-          description: record.header.id.slice(0, 21),
-          id: record.header.id,
+    const parents = records.filter(record => !record.header.parentSession && record.header.origin !== 'subagent')
+    // Titles fold once for the newest slice — the listing stays cheap even
+    // with a large session corpus.
+    const titleById = new Map<string, string>()
+    try {
+      const observations = await ctx.sessionQuery.readTitleSnapshots(parents.slice(0, 40).map(record => record.header.id))
+      for (const observation of observations) {
+        if (observation.status === 'fulfilled' && observation.value.title !== undefined) {
+          titleById.set(observation.sessionId, observation.value.title.title)
         }
-      })
-    if (choices.length === 0) {
-      store.addNotice('没有可切换的会话')
+      }
+    } catch { /* titles are display-optional */ }
+    const needle = query.trim().toLowerCase()
+    const filtered = needle === ''
+      ? parents
+      : parents.filter(record => {
+          const title = titleById.get(record.header.id) ?? ''
+          const haystack = `${title} ${record.header.cwd ?? ''} ${record.header.id}`.toLowerCase()
+          return haystack.includes(needle)
+        })
+    if (filtered.length === 0) {
+      store.addNotice(needle === '' ? '没有可切换的会话' : `没有匹配「${query.trim()}」的会话`)
       return
     }
-    const chosen = await pick('选择要切换到的会话', choices)
+    // Duplicate labels (same minute + directory) would make the picker's
+    // label→record lookup ambiguous; a counter suffix keeps them unique.
+    const seenLabels = new Map<string, number>()
+    const choices = filtered.slice(0, 9).map(record => {
+      const created = new Date(record.header.createdAt)
+      const stamp = `${created.getMonth() + 1}-${created.getDate()} ${String(created.getHours()).padStart(2, '0')}:${String(created.getMinutes()).padStart(2, '0')}`
+      const dir = record.header.cwd !== undefined ? basename(record.header.cwd) : '?'
+      const title = titleById.get(record.header.id)
+      let label = `${title !== undefined ? `${truncateLine(title, 24)} · ` : ''}${stamp} · ${dir}${record.live ? ' · 运行中' : ''}`
+      const seen = seenLabels.get(label) ?? 0
+      seenLabels.set(label, seen + 1)
+      if (seen > 0) label = `${label} #${seen + 1}`
+      return {
+        label,
+        description: record.header.id.slice(0, 21),
+        id: record.header.id,
+      }
+    })
+    const chosen = await pick(`选择要切换到的会话${needle !== '' ? `（过滤：${query.trim()}）` : ''}`, choices)
     const target = choices.find(choice => choice.label === chosen)
     if (target === undefined) return
     await switchSession(target.id)
@@ -406,6 +515,241 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     } catch { /* persisting the default is best-effort */ }
   }
 
+  // -- Session rename ----------------------------------------------------------
+
+  /** Latest log-backed title of the current session (display-optional). */
+  async function currentSessionTitle(): Promise<string | undefined> {
+    try {
+      const snapshot = await ctx.sessionQuery.readTitle(agent.session.id)
+      return snapshot?.title
+    } catch {
+      return undefined
+    }
+  }
+
+  /** `/rename <title>`: pin an explicit user title; automatic generation stops. */
+  async function runRename(arg: string): Promise<void> {
+    const titleService = ctx.get('sessionTitle')
+    const raw = arg.trim()
+    if (raw === '') {
+      const current = await currentSessionTitle()
+      store.addPanel('会话重命名', [
+        current !== undefined ? `当前标题：${current}` : '当前会话还没有标题',
+        '',
+        '用法：/rename <新标题>（重命名后自动生成标题停止，/sessions 列表按标题展示）',
+      ])
+      return
+    }
+    if (titleService === undefined) {
+      store.addNotice('会话标题服务不可用（需要 dsh-base 提供 sessionTitle）', 'error')
+      return
+    }
+    try {
+      const snapshot = titleService.rename(agent.session, raw)
+      store.addNotice(`会话已重命名：「${snapshot.title}」`)
+    } catch (error) {
+      store.addNotice(`重命名失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+    }
+  }
+
+  // -- Reasoning effort ----------------------------------------------------------
+
+  /** `/effort`: picker over the model's adapter-owned effort tiers, or a
+   * direct one-shot form (`/effort <id|name>`, `/effort status`). Switching
+   * rides the same model-selection ref as /model — next request wins. */
+  async function runEffort(arg: string): Promise<void> {
+    const current = selectionRef.current ?? selection
+    let reasoning: { efforts: readonly { id: ReasoningEffortId; name: string; description?: string }[]; defaultEffort?: ReasoningEffortId } | undefined
+    try {
+      const info = await ctx.llm.resolveModelInfo(current.provider, current.model)
+      reasoning = info.reasoning
+    } catch { /* route without reasoning metadata reports below */ }
+    if (reasoning === undefined || reasoning.efforts.length === 0) {
+      store.addNotice(`当前模型 ${current.provider}/${current.model} 没有可切换的推理强度档位`, 'warn')
+      return
+    }
+    const active = current.reasoningEffort ?? reasoning.defaultEffort
+    const activeName = reasoning.efforts.find(effort => effort.id === active)?.name ?? active ?? '(模型默认)'
+    const raw = arg.trim()
+    if (raw !== '' && raw.toLowerCase() !== 'status') {
+      const key = raw.toLowerCase()
+      const effort = reasoning.efforts.find(effort => effort.id.toLowerCase() === key || effort.name.toLowerCase() === key)
+      if (effort === undefined) {
+        store.addNotice(`未知档位：${raw}（可用：${reasoning.efforts.map(effort => effort.id).join(' / ')}）`, 'warn')
+        return
+      }
+      applyEffort(current, effort.id, effort.name)
+      return
+    }
+    if (raw.toLowerCase() === 'status') {
+      store.addPanel('推理强度', [
+        `当前：${activeName}${active === undefined ? '（未显式设置）' : ''}`,
+        ...reasoning.efforts.map(effort =>
+          `· ${effort.name}（${effort.id}${effort.id === active ? ' · 当前' : effort.id === reasoning?.defaultEffort ? ' · 默认' : ''}）${effort.description !== undefined ? ` — ${effort.description}` : ''}`),
+      ])
+      return
+    }
+    const chosen = await pick(`推理强度（当前 ${activeName}）`, reasoning.efforts.map(effort => ({
+      label: effort.name,
+      description: `${effort.id === active ? '当前' : effort.id === reasoning?.defaultEffort ? '默认' : effort.id}${effort.description !== undefined ? ` · ${truncateLine(effort.description, 26)}` : ''}`,
+    })))
+    if (chosen === undefined) return
+    const effort = reasoning.efforts.find(effort => effort.name === chosen)
+    if (effort !== undefined) applyEffort(current, effort.id, effort.name)
+  }
+
+  function applyEffort(current: { provider: string; model: string }, effortId: ReasoningEffortId, name: string): void {
+    selectionRef.current = { provider: current.provider, model: current.model, reasoningEffort: effortId }
+    try {
+      void defaultModelService.saveSelection({ provider: current.provider, model: current.model, reasoningEffort: effortId })
+        .catch(() => { /* persisting the default is best-effort */ })
+    } catch { /* saveSelection rejection is handled above */ }
+    store.addNotice(`推理强度已切换为 ${name}（下一步请求生效，已存为启动默认）`)
+  }
+
+  // -- Side question (/btw) -------------------------------------------------------
+
+  let btwController: AbortController | null = null
+
+  /** `/btw <question>`: one no-tools model call over the current conversation
+   * surface. It never touches the session log (no history, no token meter),
+   * never interrupts the main turn, and supersedes any in-flight side ask. */
+  async function runBtw(question: string): Promise<void> {
+    const trimmed = question.trim()
+    if (trimmed === '') {
+      store.addNotice('用法：/btw <问题>（复用当前上下文的单轮侧问，不打断主任务、不写入会话）', 'warn')
+      return
+    }
+    if (btwController !== null) btwController.abort()
+    const controller = new AbortController()
+    btwController = controller
+    store.addNotice(`侧问中（不打断主任务）：${truncateLine(trimmed, 50)}`)
+    try {
+      const route = selectionRef.current ?? selection
+      const message = createUserMessage({
+        content: [{ type: 'text', text: `（侧问，请直接简要回答）${trimmed}` }],
+        source: { kind: 'user' },
+      })
+      const chunks = ctx.llm.stream({
+        provider: route.provider,
+        model: route.model,
+        ...(route.reasoningEffort !== undefined ? { reasoningEffort: route.reasoningEffort } : {}),
+        messages: [...agent.session.deriveMessages(), message],
+        signal: controller.signal,
+      })
+      let answer = ''
+      let failure = ''
+      for await (const chunk of chunks) {
+        if (chunk.type === 'text-delta') answer += chunk.text
+        else if (chunk.type === 'finish') {
+          if (chunk.reason.kind === 'error') failure = '模型返回错误'
+          else if (chunk.reason.kind === 'aborted') failure = '已中止'
+        }
+      }
+      if (controller.signal.aborted) return // superseded by a newer side ask
+      if (failure !== '') {
+        store.addNotice(`侧问失败：${failure}`, 'error')
+        return
+      }
+      if (answer.trim() === '') {
+        store.addNotice('侧问没有返回内容', 'warn')
+        return
+      }
+      const width = Math.max(24, (process.stdout.columns ?? 80) - 6)
+      store.addPanel(`侧问：${trimmed}`, [
+        '',
+        ...renderMarkdownLines(answer, width),
+        '',
+        '（侧问不写入会话历史，也不计入 token 统计）',
+      ])
+    } catch (error) {
+      if (controller.signal.aborted) return
+      store.addNotice(`侧问失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+    } finally {
+      if (btwController === controller) btwController = null
+    }
+  }
+
+  // -- Context detail (/context) ---------------------------------------------------
+
+  /** `/context`: water level plus a heuristic composition split (system /
+   * tools / messages) — composition figures are estimates, the level and the
+   * last provider usage report are not. */
+  function runContext(): void {
+    const meter = ctx.get('tokenMeter')
+    const snapshot = store.getSnapshot()
+    let total = snapshot.contextTokens
+    if (meter !== undefined) {
+      try {
+        total = meter.measure(agent.session).totalTokens
+      } catch { /* keep the last refreshed value */ }
+    }
+    const window = snapshot.contextWindow
+    const percent = window !== undefined && window > 0 ? ` · ${Math.round((total / window) * 100)}%` : ''
+    // Newest request/header reconstructs the envelope the next request sends.
+    let systemChars = 0
+    let toolCount = 0
+    let toolChars = 0
+    for (let i = agent.session.events.length - 1; i >= 0; i--) {
+      const event = agent.session.events[i]!
+      if (event.type !== 'request/header') continue
+      systemChars = event.data.header.system?.length ?? 0
+      const tools = event.data.header.tools ?? []
+      toolCount = tools.length
+      toolChars = tools.reduce((sum, tool) => sum + JSON.stringify(tool).length, 0)
+      break
+    }
+    const estimate = (chars: number): number => Math.round(chars / 3)
+    const usage = snapshot.lastUsage
+    const lines = [
+      `上下文水位：${total} tokens${window !== undefined && window > 0 ? ` / ${window}` : ''}${percent}`,
+      '',
+      '组成（启发式估算，仅看大致占比）：',
+      `· 系统提示：约 ${estimate(systemChars)} tokens（${systemChars} 字符）`,
+      `· 工具定义：${toolCount} 个 · 约 ${estimate(toolChars)} tokens`,
+      `· 对话消息：约 ${Math.max(0, total - estimate(systemChars) - estimate(toolChars))} tokens`,
+      '',
+      '最近一次请求用量（provider 报告）：',
+      usage !== null
+        ? `· 输入 ${usage.inputTokens} · 输出 ${usage.outputTokens} · 缓存读 ${usage.cacheReadTokens ?? 0} · 缓存写 ${usage.cacheWriteTokens ?? 0}${usage.reasoningTokens !== undefined ? ` · 推理 ${usage.reasoningTokens}` : ''}`
+        : '· 尚无用量记录（还没有完成过一次请求）',
+    ]
+    store.addPanel('已加载上下文', lines)
+  }
+
+  // -- Environment self-check (/doctor) ----------------------------------------------
+
+  /** `/doctor`: startup facts as ✓/✗/· lines; failures point at the fix. */
+  async function runDoctor(): Promise<void> {
+    const lines: string[] = []
+    const check = (ok: boolean | null, label: string, detail: string): void => {
+      lines.push(`${ok === true ? '✓' : ok === false ? '✗' : '·'} ${label}${detail !== '' ? `：${detail}` : ''}`)
+    }
+    check(parseInt(process.versions.node.split('.')[0] ?? '0', 10) >= 22, 'Node', `${process.version}（要求 ≥22.19）`)
+    check(true, '平台', `${process.platform}/${process.arch}${process.platform === 'darwin' ? '' : '（fx-tui 仅在 macOS 上验证）'}`)
+    const dshVersion = readDshVersion()
+    check(dshVersion !== '', 'dsh 内核', dshVersion !== '' ? dshVersion : '版本号不可读（不影响使用）')
+    const route = selectionRef.current ?? selection
+    const providers = ctx.llm.listProviders().map(provider => provider.id)
+    check(providers.includes(route.provider), '模型路由', `${route.provider}/${route.model}${providers.includes(route.provider) ? '' : `（provider 未注册，可用：${providers.join(' / ') || '无'}）`}`)
+    try {
+      const info = await ctx.llm.resolveModelInfo(route.provider, route.model)
+      const window = info.context?.contextWindow
+      const efforts = info.reasoning?.efforts.length ?? 0
+      check(true, '模型能力', `上下文窗口 ${window !== undefined ? window : '未知'} · 推理档位 ${efforts > 0 ? efforts : '无'}`)
+    } catch (error) {
+      check(false, '模型能力', `解析失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+    const dshHome = process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== '' ? process.env.DSH_HOME : join(homedir(), '.dsh')
+    const hasCredentials = process.env.DEEPSEEK_API_KEY !== undefined || existsSync(join(dshHome, '.credentials.yaml'))
+    check(hasCredentials, 'API 凭证', hasCredentials ? '可用（DEEPSEEK_API_KEY 或 dsh 凭证文件）' : '未找到（DEEPSEEK_API_KEY 未设置且无 ~/.dsh/.credentials.yaml）')
+    check(true, '设置文件', `${settings.location}${existsSync(settings.location) ? '' : '（尚未生成，首次修改设置时创建）'}`)
+    check(true, '输入历史', `${inputHistory.entries.length} 条（$DSH_HOME/fx-tui-input-history.json）`)
+    check(process.stdout.isTTY === true, '终端', `TTY=${process.stdout.isTTY === true ? '是' : '否'} · ${process.stdout.columns ?? '?'}×${process.stdout.rows ?? '?'} · TERM=${process.env.TERM ?? '(未设置)'}`)
+    check(existsSync(process.cwd()), '工作目录', process.cwd())
+    store.addPanel('环境自检 /doctor', lines)
+  }
+
   /** Persisted-settings labels; keeps notices and panels uniform. */
   const modeLabel = (mode: ApprovalMode): string => mode === 'auto' ? '自动允许' : '每次询问'
   const DIRECT_MODE_WORDS: Record<string, ApprovalMode> = {
@@ -418,10 +762,15 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     开启: true, 开: true, 打开: true,
     关闭: false, 关: false,
   }
+  const NOTIFY_WORDS: Record<string, NotifyMode> = {
+    off: 'off', bell: 'bell', system: 'system',
+    关闭: 'off', 铃声: 'bell', 终端铃声: 'bell', 系统: 'system', 系统通知: 'system',
+  }
 
   /** `/config`: interactive picker for the persisted startup defaults, or a
    * direct one-shot form (`/config permission auto|ask`,
-   * `/config autoupdate on|off`). Changing a default also flips the current
+   * `/config autoupdate on|off`, `/config notify off|bell|system`,
+   * `/config autocompact on|off`). Changing a default also flips the current
    * session so both views stay consistent — unlike Shift+Tab, which never
    * touches the file. */
   async function runConfig(arg: string): Promise<void> {
@@ -443,7 +792,27 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
         applyAutoUpdate(autoTarget)
         return
       }
-      store.addNotice('用法：/config（交互选择）· /config permission <auto|ask> · /config autoupdate <on|off>', 'warn')
+      const notifyRaw = key === 'notify' && value !== undefined ? value.toLowerCase() : undefined
+      if (notifyRaw !== undefined) {
+        const notifyTarget = NOTIFY_WORDS[notifyRaw]
+        if (notifyTarget === undefined) {
+          store.addNotice('用法：/config notify <off|bell|system>（关闭 / 终端铃声 / macOS 系统通知）', 'warn')
+          return
+        }
+        applyNotify(notifyTarget)
+        return
+      }
+      const compactRaw = key === 'autocompact' && value !== undefined ? value.toLowerCase() : undefined
+      if (compactRaw !== undefined) {
+        const compactTarget = AUTO_WORDS[compactRaw]
+        if (compactTarget === undefined) {
+          store.addNotice('用法：/config autocompact <on|off>（水位过高时自动 /compact）', 'warn')
+          return
+        }
+        applyAutoCompact(compactTarget)
+        return
+      }
+      store.addNotice('用法：/config（交互选择）· /config permission <auto|ask> · /config autoupdate <on|off> · /config notify <off|bell|system> · /config autocompact <on|off>', 'warn')
       return
     }
     const modeChosen = await pick(`设置启动默认权限模式（当前 ${modeLabel(settings.approvalMode)}）`, [
@@ -460,6 +829,46 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
       const autoTarget = AUTO_WORDS[autoChosen]
       if (autoTarget !== undefined) applyAutoUpdate(autoTarget)
     }
+    const notifyChosen = await pick(`长任务完成通知（当前 ${notifyModeLabel(settings.notify)}）`, [
+      { label: '终端铃声', description: '回合超过 10 秒结束时响铃（终端的铃声/视觉提示设置决定表现形式）' },
+      { label: '系统通知', description: 'macOS 通知中心弹窗 + 提示音（同样只在超过 10 秒的回合结束时）' },
+      { label: '关闭', description: '不做任何提醒' },
+    ])
+    if (notifyChosen !== undefined) {
+      const notifyTarget = NOTIFY_WORDS[notifyChosen]
+      if (notifyTarget !== undefined) applyNotify(notifyTarget)
+    }
+    const compactChosen = await pick(`自动压缩历史（当前 ${settings.autoCompact ? '开启' : '关闭'}）`, [
+      { label: '开启', description: '空闲且上下文水位 ≥85% 时自动压缩历史（/compact 同款，压缩后无法完整回放旧对话）' },
+      { label: '关闭', description: '只在 80%/95% 水位警告，由你手动 /compact' },
+    ])
+    if (compactChosen !== undefined) {
+      const compactTarget = AUTO_WORDS[compactChosen]
+      if (compactTarget !== undefined) applyAutoCompact(compactTarget)
+    }
+  }
+
+  function applyNotify(target: NotifyMode): void {
+    const changed = settings.notify !== target
+    settings.setNotify(target)
+    if (!changed) {
+      store.addNotice(`完成通知已是${notifyModeLabel(target)}（${settings.location}）`)
+      return
+    }
+    store.addNotice(`完成通知已保存为${notifyModeLabel(target)}（${settings.location}）`)
+  }
+
+  function applyAutoCompact(target: boolean): void {
+    const changed = settings.autoCompact !== target
+    settings.setAutoCompact(target)
+    const state = target ? '开启' : '关闭'
+    if (!changed) {
+      store.addNotice(`自动压缩已是${state}（${settings.location}）`)
+      return
+    }
+    store.addNotice(
+      `自动压缩已保存为${state}` + (target ? '：空闲且上下文水位 ≥85% 时自动压缩历史' : '') + `（${settings.location}）`,
+    )
   }
 
   function applyAutoUpdate(target: boolean): void {
@@ -749,18 +1158,20 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
       switch (name) {
         case 'help':
           store.addPanel('fx-tui 按键与命令', [
-            'Enter 发送消息 · Ctrl+J 或 Opt+Enter 换行 · ↑↓ 输入历史/菜单导航',
-            'Tab 补全菜单高亮项（/ 命令、@ 文件路径） · Esc 中断轮次/清空/关闭菜单/跳过',
-            'Shift+Tab 切换权限模式（每次询问 ⇄ 自动允许） · Ctrl+O 工具详情 摘要⇄完整',
+            'Enter 发送消息（agent 运行中＝注入当前轮下一步生效） · Ctrl+J 或 Opt+Enter 换行 · ↑↓ 输入历史/菜单导航',
+            'Tab 补全菜单高亮项；agent 运行中无菜单时＝把输入排入下一轮 · Shift+Tab 切换权限模式',
+            'Alt+↑ 取回最后一条未处理消息 · Ctrl+V 粘贴剪贴板（文本直接插入，图片自动附加）',
+            'Esc 中断轮次/清空/关闭菜单/跳过 · Ctrl+O 工具详情 摘要⇄完整 · Ctrl+R Transcript 模式',
             'Ctrl+C 清空输入（空输入双击退出）',
             '',
-            '内置命令：/help 帮助 · /config 设置（含启动默认权限模式） · /theme 配色主题（自动/浅色/深色/Ghostty 精选） ·',
-            '  /edit 用 $EDITOR 写长消息 ·',
-            '  /image <路径…> 附加图片（可拖拽入窗，空参看明细）· /update 升级自身 · /exit 退出',
-            'dsh 命令（来自注册表）：/compact 压缩历史 · /goal 长任务目标 ·',
-            '  /feedback 反馈（输入 / 查看全部）',
-            '技能：/ 菜单下半的技能分组里选中插入 /技能名 手势，回车发送后模型自动加载；',
-            '  在消息里直接写 /技能名 亦可（命令优先于同名技能）',
+            '内置命令：/help 帮助 · /status 运行状态 · /sessions [关键词] 切换会话 · /rename <标题> 重命名 ·',
+            '  /model 模型 · /effort 推理强度 · /btw <问题> 侧问 · /context 上下文明细 · /doctor 自检 ·',
+            '  /config 设置（权限/更新/通知/自动压缩） · /theme 主题 · /export 导出 · /edit 外部编辑器 ·',
+            '  /image <路径…> 附加图片 · /update 升级自身 · /exit 退出',
+            'dsh 命令（来自注册表）：/compact 压缩历史 · /goal 长任务目标 · /feedback 反馈（输入 / 查看全部）',
+            '技能：/ 菜单技能分组选中插入 /技能名 手势；消息里直接写 /技能名 亦可（命令优先于同名技能）',
+            '',
+            '输入历史跨会话保存在 $DSH_HOME/fx-tui-input-history.json（上限 500 条）',
           ])
           return
         case 'exit': case 'quit': case 'bye':
@@ -779,13 +1190,16 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
           const context = snapshot.contextWindow !== undefined && snapshot.contextWindow > 0
             ? `${snapshot.contextTokens} / ${snapshot.contextWindow} tokens`
             : `${snapshot.contextTokens} tokens`
+          const title = await currentSessionTitle()
           const pluginLines = plugins.slice(0, 15).map(name => `· ${name}`)
           if (plugins.length > 15) pluginLines.push(`…（共 ${plugins.length} 个插件）`)
           store.addPanel('运行状态', [
             `fx-tui v${FX_TUI_VERSION} · Node ${process.version} · ${process.platform}/${process.arch}`,
-            `模型：${modelLabel()} · 会话：${agent.id}`,
+            `模型：${modelLabel()}${snapshot.effortLabel !== '' ? ` · 推理 ${snapshot.effortLabel}` : ''} · 会话：${agent.id}`,
+            title !== undefined ? `标题：${title}` : '标题：（未设置，/rename 可命名）',
             `权限模式：当前会话 ${modeLabel(snapshot.approvalMode)}（shift+tab 切换）· 启动默认 ${modeLabel(settings.approvalMode)}（/config 修改）`,
             `主题：${themeSavedLabel === themeActiveLabel ? themeActiveLabel : `${themeSavedLabel}，显示为${themeActiveLabel}`}（/theme 修改）`,
+            `通知：${notifyModeLabel(settings.notify)}（/config notify 修改） · 自动压缩：${settings.autoCompact ? '开启' : '关闭'}（/config autocompact 修改）`,
             `上下文：${context} · 工作区：${process.cwd()}`,
             '',
             `已加载插件（${plugins.length}）：`,
@@ -794,10 +1208,25 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
           return
         }
         case 'sessions':
-          await listSessionChoices()
+          await listSessionChoices(rest)
+          return
+        case 'rename':
+          await runRename(rest)
           return
         case 'model':
           await listModelChoices()
+          return
+        case 'effort':
+          await runEffort(rest)
+          return
+        case 'btw':
+          await runBtw(rest)
+          return
+        case 'context':
+          runContext()
+          return
+        case 'doctor':
+          await runDoctor()
           return
         case 'config': case 'setting': case 'settings':
           await runConfig(rest)
@@ -1026,21 +1455,28 @@ function bottomFlush(): void {
 }
 
   const actions = {
-    onSubmit(text: string): void {
+    /** Submit routes by busy state: idle opens a new turn (follow-up); busy
+     * steers the running turn (next step boundary); an explicit queue option
+     * (Tab) always books its own next turn. */
+    onSubmit(text: string, opts?: { queue?: boolean }): void {
       debugLog('submit', text)
       const images = store.consumePendingImages()
       const content: ContentBlock[] = []
       if (text !== '') content.push({ type: 'text', text })
       for (const image of images) content.push({ type: 'image', attachment: image.ref })
       if (content.length === 0) return
-      history.push(text)
+      inputHistory.push(text)
       const message = createUserMessage({ content, source: { kind: 'user' } })
+      const busy = store.getSnapshot().phase !== 'idle'
+      const steer = busy && opts?.queue !== true
       store.echoUser(
         message.id,
         text,
         images.map(image => image.label),
+        steer ? 'steer' : 'queue',
       )
-      agent.followup(message)
+      if (steer) agent.steer(message)
+      else agent.followup(message)
     },
     runCommand(line: string): void {
       void runCommand(line)
@@ -1050,6 +1486,50 @@ function bottomFlush(): void {
     onDroppedFiles(paths: readonly string[]): void {
       debugLog('dropped-files', paths)
       void attachImagePaths(paths)
+    },
+    /** Clipboard image (Ctrl+V): the attachment channel is the same as /image. */
+    onClipboardImage(data: Uint8Array, name: string): void {
+      debugLog('clipboard-image', name)
+      void (async () => {
+        try {
+          const [ref] = await ctx.attachments.saveImages([{ data, mediaType: 'image/png', name }])
+          if (ref === undefined) {
+            store.addNotice('剪贴板图片保存失败：未返回引用', 'error')
+            return
+          }
+          store.addPendingImage(ref, `${name}（${ref.width}×${ref.height}，剪贴板）`)
+          store.addNotice(`已附加剪贴板图片（${ref.width}×${ref.height}），将随下一条消息发送`)
+        } catch (error) {
+          store.addNotice(`剪贴板图片校验失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+        }
+      })()
+    },
+    /** Alt+Up: pull the newest unclaimed message back into the editor. The
+     * inbox removal is durably logged; a message the driver already claimed
+     * stays on its way into the transcript. */
+    onRecallPending(): string | null {
+      const pending = store.getSnapshot().queuedMessages
+      const newest = pending[pending.length - 1]
+      if (newest === undefined) return null
+      let stillPending = true
+      try {
+        stillPending = agent.inbox.remove(MessageId(newest.id))
+      } catch {
+        // An identity the inbox never held (already claimed and promoted):
+        // fall through and let the store drop its stale indicator below.
+        stillPending = false
+      }
+      if (!stillPending) {
+        // The driver claimed it between the indicator render and this recall;
+        // drop the stale indicator — its user/message event renders the text.
+        store.removeQueued(newest.id)
+        return null
+      }
+      const removed = store.removeQueued(newest.id)
+      if (removed === undefined) return null
+      if (removed.images.length > 0) store.addNotice('已取回消息（随原消息附加的图片不会取回，需重新附加）')
+      else store.addNotice('已取回最后一条未处理消息到输入框')
+      return removed.text
     },
     onInterrupt(): void {
       store.setInterrupting()

@@ -12,6 +12,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import type { NotifyMode } from './notify.js'
+import { isNotifyMode } from './notify.js'
 import type { ApprovalMode } from './store.js'
 import type { ThemeSetting } from './ui/theme.js'
 import { isThemeSetting } from './ui/theme.js'
@@ -24,11 +26,19 @@ export const DEFAULT_AUTO_UPDATE = true
 /** Theme ships as 'auto': startup background detection picks light/dark. */
 export const DEFAULT_THEME: ThemeSetting = 'auto'
 
+/** Long-turn completion rings the terminal bell by default; 'system' opts into the macOS popup. */
+export const DEFAULT_NOTIFY: NotifyMode = 'bell'
+
+/** Auto-compaction stays opt-in: it rewrites history, so the user turns it on deliberately. */
+export const DEFAULT_AUTO_COMPACT = false
+
 interface SettingsFile {
   version: 1
   approvalMode: ApprovalMode
   autoUpdate?: boolean
   theme?: ThemeSetting
+  notify?: NotifyMode
+  autoCompact?: boolean
 }
 
 const FILE_VERSION = 1
@@ -43,6 +53,8 @@ export class FxSettings {
   private mode: ApprovalMode
   private auto: boolean
   private themeValue: ThemeSetting
+  private notifyValue: NotifyMode
+  private autoCompactValue: boolean
   private readonly filePath: string
 
   constructor(dshHome: string | undefined) {
@@ -52,6 +64,8 @@ export class FxSettings {
     this.mode = loaded.approvalMode
     this.auto = loaded.autoUpdate
     this.themeValue = loaded.theme
+    this.notifyValue = loaded.notify
+    this.autoCompactValue = loaded.autoCompact
   }
 
   get approvalMode(): ApprovalMode {
@@ -64,6 +78,14 @@ export class FxSettings {
 
   get theme(): ThemeSetting {
     return this.themeValue
+  }
+
+  get notify(): NotifyMode {
+    return this.notifyValue
+  }
+
+  get autoCompact(): boolean {
+    return this.autoCompactValue
   }
 
   /** The path surfaced by `/config` so users know where to look / reset. */
@@ -86,6 +108,16 @@ export class FxSettings {
     this.save()
   }
 
+  setNotify(mode: NotifyMode): void {
+    this.notifyValue = mode
+    this.save()
+  }
+
+  setAutoCompact(enabled: boolean): void {
+    this.autoCompactValue = enabled
+    this.save()
+  }
+
   private save(): void {
     try {
       mkdirSync(dirname(this.filePath), { recursive: true })
@@ -94,6 +126,8 @@ export class FxSettings {
         approvalMode: this.mode,
         ...(this.auto === DEFAULT_AUTO_UPDATE ? {} : { autoUpdate: this.auto }),
         ...(this.themeValue === DEFAULT_THEME ? {} : { theme: this.themeValue }),
+        ...(this.notifyValue === DEFAULT_NOTIFY ? {} : { notify: this.notifyValue }),
+        ...(this.autoCompactValue === DEFAULT_AUTO_COMPACT ? {} : { autoCompact: this.autoCompactValue }),
       }
       writeFileSync(this.filePath, `${JSON.stringify(file, null, 2)}\n`, { encoding: 'utf8' })
     } catch {
@@ -102,7 +136,13 @@ export class FxSettings {
   }
 }
 
-function loadSettings(filePath: string): { approvalMode: ApprovalMode; autoUpdate: boolean; theme: ThemeSetting } {
+function loadSettings(filePath: string): {
+  approvalMode: ApprovalMode
+  autoUpdate: boolean
+  theme: ThemeSetting
+  notify: NotifyMode
+  autoCompact: boolean
+} {
   try {
     const parsed: unknown = JSON.parse(readFileSync(filePath, 'utf8'))
     if (typeof parsed === 'object' && parsed !== null) {
@@ -110,10 +150,18 @@ function loadSettings(filePath: string): { approvalMode: ApprovalMode; autoUpdat
       const approvalMode = isApprovalMode(raw.approvalMode) ? raw.approvalMode : DEFAULT_APPROVAL_MODE
       const autoUpdate = typeof raw.autoUpdate === 'boolean' ? raw.autoUpdate : DEFAULT_AUTO_UPDATE
       const theme = isThemeSetting(raw.theme) ? raw.theme : DEFAULT_THEME
-      return { approvalMode, autoUpdate, theme }
+      const notify = isNotifyMode(raw.notify) ? raw.notify : DEFAULT_NOTIFY
+      const autoCompact = typeof raw.autoCompact === 'boolean' ? raw.autoCompact : DEFAULT_AUTO_COMPACT
+      return { approvalMode, autoUpdate, theme, notify, autoCompact }
     }
   } catch {
     // absent or malformed file starts at the built-in defaults
   }
-  return { approvalMode: DEFAULT_APPROVAL_MODE, autoUpdate: DEFAULT_AUTO_UPDATE, theme: DEFAULT_THEME }
+  return {
+    approvalMode: DEFAULT_APPROVAL_MODE,
+    autoUpdate: DEFAULT_AUTO_UPDATE,
+    theme: DEFAULT_THEME,
+    notify: DEFAULT_NOTIFY,
+    autoCompact: DEFAULT_AUTO_COMPACT,
+  }
 }

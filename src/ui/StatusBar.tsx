@@ -1,9 +1,11 @@
 /**
- * The live status line: spinner + phase on the left, context/usage on the
- * right. Model and session id live only in the welcome banner — repeating
+ * The live status line: spinner + phase on the left, context/usage/effort on
+ * the right. Model and session id live only in the welcome banner — repeating
  * them here would duplicate it. The left side degrades (reasoning suffix,
  * then detail) before it is allowed to wrap, so the line never breaks the
- * layout.
+ * layout. On the right, the context water level colors amber at 80% and red
+ * at 95%, and low-priority segments (effort, then usage) drop first when the
+ * terminal is narrow.
  */
 
 import { useEffect, useState } from 'react'
@@ -23,6 +25,8 @@ export interface StatusBarProps {
   contextTokens: number
   contextWindow?: number
   childAgents: number
+  /** Reasoning effort carried by the latest request ('' when none/default). */
+  effortLabel: string
 }
 
 export function StatusBar(props: StatusBarProps): ReactElement {
@@ -47,11 +51,13 @@ export function StatusBar(props: StatusBarProps): ReactElement {
         : '就绪'
 
   const context = contextText(props.contextTokens, props.contextWindow)
-  // Usage degrades before the context level so the water level survives
-  // narrow terminals.
-  const parts: Array<{ text: string; priority: number }> = [
-    { text: context, priority: 2 },
+  const contextColor = contextTone(props.contextTokens, props.contextWindow)
+  // Degradation order: effort drops first, then usage — the context level
+  // survives narrow terminals, colored by its pressure.
+  const parts: Array<{ text: string; priority: number; color?: string }> = [
+    { text: context, priority: 2, ...(contextColor !== undefined ? { color: contextColor } : {}) },
     { text: props.usage, priority: 1 },
+    { text: props.effortLabel !== '' ? `推理 ${props.effortLabel}` : '', priority: 0 },
   ]
   const kept = parts.map(p => p.text)
   const fits = (): boolean => stringWidth(kept.filter(t => t !== '').join(' · ')) <= width - 10
@@ -69,8 +75,9 @@ export function StatusBar(props: StatusBarProps): ReactElement {
     if (dropIdx < 0) break
     kept[dropIdx] = ''
   }
-  const right = kept.filter(t => t !== '').join(' · ')
-  const budget = Math.max(12, width - stringWidth(right) - 4)
+  const visible = parts
+    .map((part, index) => ({ ...part, text: kept[index] ?? '' }))
+    .filter(part => part.text !== '')
 
   let left = ` ${label}`
   if (props.childAgents > 0) left += ` · 🌱×${props.childAgents}`
@@ -78,6 +85,7 @@ export function StatusBar(props: StatusBarProps): ReactElement {
   const withReasoning = props.phase === 'thinking' && props.reasoningChars > 0
     ? `${withDetail} · 已思考 ${formatCount(props.reasoningChars)} 字`
     : withDetail
+  const budget = Math.max(12, width - stringWidth(visible.map(part => part.text).join(' · ')) - 4)
   if (stringWidth(withReasoning) <= budget) {
     left = withReasoning
   } else if (stringWidth(withDetail) <= budget) {
@@ -92,7 +100,11 @@ export function StatusBar(props: StatusBarProps): ReactElement {
       <Text color={active ? theme.accent : theme.success}>{active ? frame : '●'}</Text>
       <Text>{left}</Text>
       <Box flexGrow={1} />
-      <Text dimColor>{right}</Text>
+      {visible.map((part, index) => (
+        <Text key={index} dimColor={part.color === undefined} color={part.color}>
+          {`${index > 0 ? ' · ' : ''}${part.text}`}
+        </Text>
+      ))}
     </Box>
   )
 }
@@ -110,4 +122,13 @@ function contextText(tokens: number, window: number | undefined): string {
   if (window === undefined || window <= 0) return `上下文 ~${used}`
   const percent = Math.round((tokens / window) * 100)
   return `上下文 ${percent}% (${used}/${formatCount(window)})`
+}
+
+/** Pressure tone for the context segment: red at 95%, amber at 80%, muted otherwise. */
+function contextTone(tokens: number, window: number | undefined): string | undefined {
+  if (tokens <= 0 || window === undefined || window <= 0) return undefined
+  const ratio = tokens / window
+  if (ratio >= 0.95) return theme.danger
+  if (ratio >= 0.8) return theme.warning
+  return undefined
 }

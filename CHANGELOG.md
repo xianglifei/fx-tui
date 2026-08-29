@@ -3,6 +3,123 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.17.0] - 2026-08-29
+
+### 功能：长任务完成通知 — 终端铃声 / macOS 系统通知（/config notify）
+
+- **动机**：把长任务挂在 fx 里、人切去别的窗口是常态，回合结束毫无感知，
+  只能时不时切回来看一眼；这是日用痛感最大的一项
+- **触发口径**：`turn/start` → `turn/end` 计时，**超过 10 秒**的回合结束时提醒
+  （短回合用户还在看屏幕，不打扰）；用户主动 Esc 中断的回合不提醒
+- **三种模式**：`bell`（默认，写 BEL，终端的铃声/视觉提示设置决定表现形式）/
+  `system`（osascript 弹 macOS 通知中心 + 提示音，`任务完成（耗时 N 秒）`，
+  出错回合为「任务出错」）/ `off`；`/config notify <off|bell|system>` 直改或
+  `/config` 交互选择，持久化到设置文件
+
+### 功能：Ctrl+V 剪贴板粘贴 — 文本直插光标处，图片自动附加
+
+- **动机**：图片输入原本只有拖拽一条路；截图（⌘⇧⌃⇧4 进剪贴板）是 mac 上
+  最高频的图片来源，却要先进 Finder 再拖，纯多余一步
+- **行为**：`Ctrl+V`（或 `Opt+V`，防部分终端拦截 Ctrl+V）读取系统剪贴板——
+  有文本就按普通多行插入（粘贴通道同款，经编辑器的纯函数 splice，异步读取
+  期间继续打字不丢字）；无文本则尝试位图：AppleScript 读剪贴板 PNG（部分应用
+  只放 TIFF 时经 sips 转 PNG），经 dsh attachment 服务校验后进附件托盘，随下
+  一条消息发送，命名 `clipboard-<时间戳>.png`；两者皆空才提示「剪贴板中没有
+  文本或图片」。零新增依赖（pbpaste / osascript / sips 均为 macOS 自带）
+
+### 功能：输入历史跨会话持久化
+
+- **动机**：↑/↓ 翻阅的输入历史只存在内存里，重启即失；「上次那条命令怎么写
+  的来着」是最常见的回访需求
+- **行为**：提交过的消息落盘 `$DSH_HOME/fx-tui-input-history.json`（纯 JSON
+  数组，上限 500 条、连续重复折叠），启动时载入；删除文件即清空。编辑器依旧
+  按引用读活数组，浏览无额外渲染开销
+
+### 功能：steering 三语义 — Enter 注入当前轮 / Tab 排队下一轮 / Alt+↑ 取回
+
+- **动机**：原来 agent 运行中提交只有「排队到下一轮」一种语义；想纠正正在
+ 进行的方向（「不对，换个思路」）只能打断重来，或干等回合结束
+- **Enter（运行中）＝注入**：`agent.steer()` 把消息送进最近一步的边界，模型
+  在当前回合的下一步就看到；指示器显示 `🧭 已注入（下一步生效）`。空闲时
+  Enter 语义不变（新回合）
+- **Tab（运行中、无补全菜单时）＝排队**：保持原 `followup` 行为，`⏳ 已排队
+  （下一轮生效）`；菜单打开时 Tab 仍是补全，互不冲突
+- **Alt+↑＝取回**：最后一条还没被处理的消息（注入/排队均可）从 inbox 撤回
+  （`inbox.remove`，durable 记录）并回填输入框修改重发；已被 driver 认领的
+  消息不取回（正要进转录）。Esc 中断回合时排队/注入消息照旧随轮次丢弃并提示
+
+### 功能：/effort 推理强度热切换 + 状态栏 TPS / 缓存命中率 / 推理等级
+
+- **动机**：deepseek 系模型按档位（off/high/max…）分推理强度，fx-tui 一直
+  没有入口；输出多快、缓存命中多少也全靠猜
+- **/effort**：无参弹出档位选择器（来自 `ctx.llm.resolveModelInfo` 的
+  adapter 档位表，标注当前/默认）；`/effort <id|名>` 直改；`/effort status`
+  看全表。切换与 /model 同路（`ModelSelection.reasoningEffort`，下一步请求
+  生效）并持久化为启动默认
+- **状态栏增强**：用量段新增**缓存命中率**（缓存读 / 全部输入 token）与
+  **输出速度 tok/s**（首个文本 delta → 消息装配的真实测量窗，短窗不显示避免
+  荒谬值）；新增**推理等级**段（取自真实请求头 `request/header`）；右侧分段
+  按优先级降级（先丢推理等级、再丢用量），上下文水位永远保留
+- **上下文水位变色**：≥80% 琥珀、≥95% 红，越过阈值一次性警告（80% 提示
+  /compact、95% 提示开自动压缩），压缩后水位回落自动重新武装
+
+### 功能：/btw 侧问 — 复用上下文的单轮提问，不打断主任务
+
+- **动机**：主回合跑着长任务时想顺口问一句「这个报错什么意思」，要么打断、
+  要么开新会话重新贴上下文
+- **行为**：`/btw <问题>` 直接经 `ctx.llm.stream()` 发一次**无工具单轮调用**
+  （消息列表 = 当前模型可见面 + 侧问），答案以面板呈现（Markdown 渲染）；
+  **不写入会话历史、不计 token 统计、不打断运行中的回合**；连续侧问后者取代
+  前者（AbortController 中止旧流）
+
+### 功能：/rename 会话重命名 + /sessions 标题展示与关键词过滤
+
+- **/rename**：空参显示当前标题；`/rename <新标题>` 经 `ctx.sessionTitle.
+  rename` 写 `session/title` 事件（user 来源，**钉住标题**：自动生成停止），
+  /sessions 列表与 /status 面板随即按标题展示
+- **/sessions**：列表批量折叠标题（`readTitleSnapshots`，一次观测），标签
+  `标题 · 时间 · 目录 · 运行中`；`/sessions <关键词>` 按标题/目录/会话 id
+  过滤后再弹选择器；同分钟同目录的重复标签自动加 `#N` 后缀保证回查唯一
+
+### 功能：/context 上下文明细 + /doctor 环境自检
+
+- **/context**：水位（token-meter 的 provider 锚定值）+ 组成估算（系统提示/
+  工具定义/对话消息三段，按最新 `request/header` 包络启发式估算，标注仅供
+  看占比）+ 最近一次请求的 provider 用量报告（输入/输出/缓存读/缓存写/推理）
+- **/doctor**：Node 版本、平台、dsh 内核版本、模型路由与能力（上下文窗口、
+  推理档位数）、API 凭证（环境变量或 `~/.dsh/.credentials.yaml`）、设置与
+  输入历史文件、终端 TTY/尺寸/TERM、工作目录——逐项 ✓/✗/·，失败项直指修法
+
+### 功能：可选自动压缩（/config autocompact on|off，默认关闭）
+
+- **动机**：95% 水位警告了但人不在，长会话照样撞墙；压缩改写历史，必须用户
+  明示开启而不是默认行事
+- **行为**：开启后，agent 进入 idle 且水位 ≥85% 时经 `ctx.compaction.
+  compactIfNeeded(agent, 'pressure')` 自动压缩（dsh 内核的压力策略决定压哪
+  段），完成即刷新水位并通知；一个高压周期只尝试一次，水位回落自动重置；
+  失败/无可压区间都降级为提示，绝不影响回合循环
+
+### 修复：审批请求撤销不再悬挂 promise
+
+- **动机**：上游 abort 审批请求时 `cancelApproval()` 只清了 resolver 不
+  resolve，`approval/request` waterfall 的 await 永远挂着（review-report 遗留 P0）
+- **行为**：撤销现在按 **fail-closed 拒绝** resolve（与 Esc=拒绝一致），并
+  留下「审批请求已撤销，按拒绝处理」提示
+
+### 影响面
+
+- 新增模块：`src/history.ts`（输入历史）、`src/clipboard.ts`（pbpaste/
+  osascript/sips 封装）、`src/notify.ts`（通知三模式）；`store.ts` 事件归约
+  扩展 `request/header`（推理等级）与流式计时窗；`ui/Input.tsx` 键位新增
+  Ctrl+V / Tab 排队 / Alt+↑；`ui/StatusBar.tsx` 右侧分段着色改造
+- 设置文件新增 `notify` / `autoCompact` 两键（缺省不落盘，老文件兼容）；
+  类型依赖新增 `@deepseek-ai/dsh-compaction`、`@deepseek-ai/dsh-session-title`
+  （0.1.1-rc.2，devDependencies，仅取类型声明，运行时服务由 dsh-base 提供，
+  **零新增运行时依赖**）
+- 全部新功能经真实 dsh 环境端到端验证（pty 驱动：/doctor /context /btw
+  /effort /rename /sessions 实跑、真实回合的 steer 注入与撤销丢弃、缓存命中
+  率与 tok/s 展示、剪贴板 PNG 读取链路、通知三模式）。版本号升至 0.17.0
+
 ## [0.16.1] - 2026-08-29
 
 ### 修复：技能菜单呈现打磨 — 简介截断 + 显式双分组标题

@@ -81,11 +81,16 @@ export interface PendingImage {
   readonly label: string
 }
 
-/** A message submitted while the agent was busy; delivered when the turn claims it. */
+/**
+ * A message submitted while the agent was busy. 'queue' rides as its own next
+ * turn (Tab / follow-up); 'steer' enters at the next step boundary (Enter
+ * while busy). Both promote into the transcript when their session event lands.
+ */
 export interface QueuedMessage {
   readonly id: string
   readonly text: string
   readonly images: readonly string[]
+  readonly mode: 'queue' | 'steer'
 }
 
 export type Phase = 'idle' | 'thinking' | 'streaming' | 'tool'
@@ -116,6 +121,8 @@ export interface Snapshot {
   readonly questionFreeText: boolean
   readonly contextTokens: number
   readonly contextWindow?: number
+  readonly effortLabel: string
+  readonly lastUsage: TokenUsage | null
   readonly verboseToolDetail: boolean
   readonly exitArmed: boolean
   readonly sessionId: string
@@ -160,6 +167,10 @@ export class TuiStore {
   private questionResolve: ((answer: AskUserQuestionAnswer) => void) | null = null
   private contextTokens = 0
   private contextWindow: number | undefined
+  private pressureWarnedLevel = 0
+  private effortLabel = ''
+  private lastUsage: TokenUsage | null = null
+  private streamStartMs: number | null = null
   private verboseToolDetail = false
   private exitArmed = false
   private exitTimer: ReturnType<typeof setTimeout> | null = null
@@ -215,6 +226,8 @@ export class TuiStore {
       questionFreeText: this.questionActive !== null && (this.questionActive.item.options ?? []).length === 0,
       contextTokens: this.contextTokens,
       contextWindow: this.contextWindow,
+      effortLabel: this.effortLabel,
+      lastUsage: this.lastUsage,
       verboseToolDetail: this.verboseToolDetail,
       exitArmed: this.exitArmed,
       sessionId: this.sessionId,
@@ -297,6 +310,9 @@ export class TuiStore {
         if (this.replaying) break
         const chunk = ev.data.chunk
         if (chunk.type === 'text-delta') {
+          // First visible delta opens the TPS measurement window; the paired
+          // assistant/message closes it against its usage report.
+          if (this.streamStartMs === null) this.streamStartMs = ev.time
           this.streamBuf += chunk.text
           this.phase = 'streaming'
         } else if (chunk.type === 'reasoning-delta') {
@@ -319,7 +335,12 @@ export class TuiStore {
             interrupted: ev.data.interrupted === true,
           })
         }
-        if (ev.data.usage !== undefined) this.usage = formatUsage(ev.data.usage)
+        if (ev.data.usage !== undefined) {
+          this.lastUsage = { ...ev.data.usage }
+          const durationMs = this.streamStartMs !== null ? Math.max(0, ev.time - this.streamStartMs) : null
+          this.usage = formatUsage(ev.data.usage, durationMs)
+        }
+        this.streamStartMs = null
         this.phase = 'thinking'
         this.phaseDetail = ''
         break
@@ -372,6 +393,13 @@ export class TuiStore {
         if (ev.data.contextWindow !== undefined) this.contextWindow = ev.data.contextWindow
         break
       }
+      case 'request/header': {
+        // The effort actually carried by requests; absent means the model
+        // runs its provider default.
+        const effort = ev.data.header.config.reasoningEffort
+        this.effortLabel = effort !== undefined && effort !== '' ? effort : ''
+        break
+      }
       case 'todo/write': {
         this.todos = [...ev.data.todos]
         break
@@ -381,6 +409,7 @@ export class TuiStore {
         this.phase = 'idle'
         this.phaseDetail = ''
         this.reasoningChars = 0
+        this.streamStartMs = null
         if (ev.data.reason.kind === 'aborted' && this.queuedMessages.length > 0) {
           // A user cancel clears queued inbox work; reflect the drop.
           this.items.push({
@@ -444,11 +473,13 @@ export class TuiStore {
   // -- Local actions -------------------------------------------------------
 
   /** Echo a submitted message: immediately as a transcript item when idle, or
-   * as a queued indicator when the agent is busy (promoted on its session event). */
-  echoUser(id: string, text: string, images?: readonly string[]): void {
+   * as a pending indicator when the agent is busy (promoted on its session
+   * event). `mode` only labels the indicator — delivery semantics belong to
+   * the caller's steer/follow-up choice. */
+  echoUser(id: string, text: string, images?: readonly string[], mode: 'queue' | 'steer' = 'queue'): void {
     this.echoedId = id
     if (this.phase !== 'idle') {
-      this.queuedMessages.push({ id, text, images: images ?? [] })
+      this.queuedMessages.push({ id, text, images: images ?? [], mode })
     } else {
       this.items.push({ kind: 'user', text, ...(images !== undefined && images.length > 0 ? { images } : {}) })
       this.phase = 'thinking'
@@ -479,6 +510,10 @@ export class TuiStore {
     this.phaseDetail = ''
     this.usage = ''
     this.reasoningChars = 0
+    this.effortLabel = ''
+    this.lastUsage = null
+    this.streamStartMs = null
+    this.pressureWarnedLevel = 0
     this.echoedId = null
     this.replay(events)
     this.finishReplay()
@@ -607,10 +642,42 @@ export class TuiStore {
     return next
   }
 
-  /** Context pressure from the token meter; window comes from request/context events. */
+  /** Context pressure from the token meter; window comes from request/context events.
+   * Crossing 80%/95% upward warns once per episode; dropping back below 80%
+   * (a /compact) re-arms the warnings. */
   setContextPressure(tokens: number): void {
     this.contextTokens = tokens
+    if (this.contextWindow !== undefined && this.contextWindow > 0 && tokens > 0) {
+      const ratio = tokens / this.contextWindow
+      if (ratio >= 0.95 && this.pressureWarnedLevel < 2) {
+        this.pressureWarnedLevel = 2
+        this.items.push({
+          kind: 'notice',
+          tone: 'warn',
+          text: '上下文已用 95% 以上：建议立即 /compact 压缩历史（或 /config autocompact on 开启自动压缩）',
+        })
+      } else if (ratio >= 0.8 && this.pressureWarnedLevel < 1) {
+        this.pressureWarnedLevel = 1
+        this.items.push({
+          kind: 'notice',
+          tone: 'warn',
+          text: '上下文已用 80% 以上：可用 /compact 压缩历史',
+        })
+      } else if (ratio < 0.8) {
+        this.pressureWarnedLevel = 0
+      }
+    }
     this.commit()
+  }
+
+  /** Remove one pending queued/steered message from the indicator list
+   * (Alt+Up recall); undefined when the id is no longer pending. */
+  removeQueued(id: string): QueuedMessage | undefined {
+    const index = this.queuedMessages.findIndex(message => message.id === id)
+    if (index < 0) return undefined
+    const [removed] = this.queuedMessages.splice(index, 1)
+    this.commit()
+    return removed
   }
 
   /** Raw args of a pending call, for approval memory keys and prompts. */
@@ -649,12 +716,22 @@ export class TuiStore {
     resolve(choice)
   }
 
-  /** Withdraw a pending approval prompt (request aborted upstream). */
+  /** Withdraw a pending approval prompt (request aborted upstream). Resolves
+   * fail-closed: leaving the promise pending would hang the awaiting
+   * approval/request waterfall forever. */
   cancelApproval(): void {
     if (this.approvalResolve === null) return
+    const resolve = this.approvalResolve
+    const toolName = this.approval?.toolName ?? '(tool)'
     this.approvalResolve = null
     this.approval = null
+    this.items.push({
+      kind: 'notice',
+      tone: 'warn',
+      text: `审批请求已撤销，按拒绝处理：${toolName}`,
+    })
     this.commit()
+    resolve('reject')
   }
 
   // -- User-questions bridge -------------------------------------------------
@@ -802,10 +879,19 @@ function truncate(text: string, limit: number): string {
   return `${text.slice(0, limit)}\n…（已截断）`
 }
 
-function formatUsage(usage: TokenUsage): string {
+/** Status-bar usage summary: in/out counts, cache-hit share of the prompt,
+ * and output speed for live-streamed requests. The speed needs a real
+ * measurement window — a single-chunk answer spans a millisecond or two and
+ * would advertise absurd rates, so short windows stay unreported. */
+function formatUsage(usage: TokenUsage, durationMs: number | null): string {
   let text = `↑${formatCount(usage.inputTokens)} ↓${formatCount(usage.outputTokens)}`
-  if (usage.cacheReadTokens !== undefined && usage.cacheReadTokens > 0) {
-    text += ` · 缓存 ${formatCount(usage.cacheReadTokens)}`
+  const cacheRead = usage.cacheReadTokens ?? 0
+  const promptTotal = usage.inputTokens + cacheRead + (usage.cacheWriteTokens ?? 0)
+  if (cacheRead > 0 && promptTotal > 0) {
+    text += ` · 缓存 ${Math.round((cacheRead / promptTotal) * 100)}%`
+  }
+  if (durationMs !== null && durationMs >= 500 && usage.outputTokens > 0) {
+    text += ` · ${(usage.outputTokens / (durationMs / 1000)).toFixed(1)} tok/s`
   }
   return text
 }

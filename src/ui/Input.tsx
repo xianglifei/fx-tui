@@ -17,6 +17,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { Box, Text, useInput, usePaste, useStdout } from 'ink'
 import type { PendingImage, TuiStore } from '../store.js'
+import { readClipboardImage, readClipboardText } from '../clipboard.js'
 import { isExistingImagePath, parsePathChunk } from '../path-drops.js'
 import { OSC11_REMNANT_RE } from '../terminal-bg.js'
 import { fuzzyMatchPaths, listWorkspaceFiles } from '../workspace-files.js'
@@ -28,6 +29,11 @@ export interface MenuEntry {
   readonly name: string
   readonly description: string
   readonly kind: 'builtin' | 'dsh' | 'skill'
+}
+
+export interface SubmitOptions {
+  /** Queue as its own follow-up turn instead of steering the running one. */
+  queue?: boolean
 }
 
 export interface InputBoxProps {
@@ -46,7 +52,11 @@ export interface InputBoxProps {
   runCommand(line: string): void
   /** Attaches extracted drop paths to the next message (terminal file-drop). */
   onDropFiles?: (paths: readonly string[]) => void
-  onSubmit(text: string): void
+  onSubmit(text: string, opts?: SubmitOptions): void
+  /** Recall the newest unclaimed message back into the editor; null when none pending. */
+  onRecallPending(): string | null
+  /** Attach a clipboard image (PNG bytes + display name) to the next message. */
+  onClipboardImage(data: Uint8Array, name: string): void
   onInterrupt(): void
   onExit(): void
   /** Reports the box's rendered row count (feeds the splash filler budget). */
@@ -85,8 +95,8 @@ interface Menu {
 }
 
 const HELP_TEXT =
-  'Enter 发送 · Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全 · Esc 中断/清空 · Ctrl+O 工具详情 · ' +
-  'Ctrl+C 清空，空输入时双击退出 · /help 帮助 · /edit 外部编辑器 · /image <路径> 附加图片'
+  'Enter 发送（运行中＝注入当前轮）· Ctrl+J 换行 · Tab 运行中排队下一轮 · ↑↓ 历史/菜单 · Alt+↑ 取回消息 · ' +
+  'Ctrl+V 粘贴（含剪贴板图片） · Esc 中断/清空 · Ctrl+O 工具详情 · Ctrl+C 清空，空输入时双击退出 · /help 帮助'
 
 /** Visible entry rows the menu always occupies; a longer filtered list scrolls
  * through this window, a shorter one is blank-filled to keep the frame height. */
@@ -99,7 +109,7 @@ const MAX_FILE_MATCHES = 60
 const MENU_DESC_COLUMNS = 40
 
 export function InputBox(props: InputBoxProps): ReactElement {
-  const { store, history, frozen, questionFreeText, seed, restore, pendingImages, listCommands, runCommand, onSubmit, onDropFiles, onInterrupt, onExit, onHeightChange } = props
+  const { store, history, frozen, questionFreeText, seed, restore, pendingImages, listCommands, runCommand, onSubmit, onRecallPending, onClipboardImage, onDropFiles, onInterrupt, onExit, onHeightChange } = props
   const [ed, setEd] = useState<EditorState>(() => restore ?? seedToState(seed))
   const [histIdx, setHistIdx] = useState(-1)
   const [draft, setDraft] = useState<string | null>(null)
@@ -316,6 +326,13 @@ export function InputBox(props: InputBoxProps): ReactElement {
       // Any other key falls through to normal editing; the menu re-derives.
     }
 
+    // Tab with no completion menu open: while the agent is busy, queue the
+    // draft as its own follow-up turn — Enter steers the running turn instead.
+    if (key.tab) {
+      if (!isEmpty && store.getSnapshot().phase !== 'idle') submitAsQueue()
+      return
+    }
+
     // Coalesced typing or piped automation: insert as (multi-)line text and
     // submit when the chunk carries a trailing newline.
     if (input.length > 1) {
@@ -335,12 +352,28 @@ export function InputBox(props: InputBoxProps): ReactElement {
       return
     }
 
+    if ((key.ctrl || key.meta) && input === 'v') {
+      void pasteFromClipboard()
+      return
+    }
+
     if (key.ctrl && input === 'o') {
       store.toggleVerboseToolDetail()
       return
     }
     if (key.ctrl && input === 'r') {
       store.toggleVerboseTranscript()
+      return
+    }
+
+    // Alt/Option+Up recalls the newest unclaimed message into the editor.
+    if (key.upArrow && key.meta) {
+      const text = onRecallPending()
+      if (text !== null) {
+        setEd(seedToState(text))
+        setHistIdx(-1)
+        setDraft(null)
+      }
       return
     }
 
@@ -568,6 +601,42 @@ export function InputBox(props: InputBoxProps): ReactElement {
     setEd({ lines: [''], row: 0, col: 0 })
     setHistIdx(-1)
     setDraft(null)
+  }
+
+  /** Queue the draft as its own follow-up turn while the agent is busy (Tab).
+   * Free-text questions and slash commands keep their Enter semantics — only
+   * plain messages have a queue/steer distinction. */
+  function submitAsQueue(): void {
+    const text = ed.lines.join('\n').trim()
+    if (text === '') return
+    if (questionFreeText || text.startsWith('/')) {
+      submit()
+      return
+    }
+    onSubmit(text, { queue: true })
+    setEd({ lines: [''], row: 0, col: 0 })
+    setHistIdx(-1)
+    setDraft(null)
+  }
+
+  /** Ctrl/Cmd+V: clipboard text inserts at the cursor (a functional update —
+   * the read is async and typing may have moved the editor on); a bitmap
+   * attaches to the next message as an image. */
+  async function pasteFromClipboard(): Promise<void> {
+    const text = await readClipboardText()
+    if (text !== '') {
+      const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+      if (normalized !== '') {
+        setEd(current => spliceInto(current, normalized))
+        return
+      }
+    }
+    const image = await readClipboardImage()
+    if (image === null) {
+      store.addNotice('剪贴板中没有文本或图片', 'warn')
+      return
+    }
+    onClipboardImage(image.data, image.name)
   }
 
   function browseHistory(direction: -1 | 1): void {
