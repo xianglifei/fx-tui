@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { ReactElement } from 'react'
+import type { Dispatch, ReactElement, SetStateAction } from 'react'
 import { Box, Text, useInput, usePaste, useStdout } from 'ink'
 import type { PendingImage, TuiStore } from '../store.js'
 import { readClipboardImage, readClipboardText } from '../clipboard.js'
@@ -42,12 +42,19 @@ export interface InputBoxProps {
   frozen: boolean
   /** A pending free-text question: Enter answers it instead of sending a message. */
   questionFreeText: boolean
-  /** Initial editor content (used when re-mounting after the external editor). */
-  seed?: string
-  /** Full editor state (text + cursor) captured from a previous mount; takes
-   * precedence over `seed` when a resize rebuild must not lose the draft. */
-  restore?: EditorState
+  /** Show the free-text answer hint inside the editor (empty editor only). */
+  showFreeTextHint: boolean
   pendingImages: readonly PendingImage[]
+  /** Editor state lives in App (not here): the splash-filler budget must be
+   * computed from the input's height in the SAME commit that paints the input,
+   * and a late useLayoutEffect report paints one oversized frame first — the
+   * terminal scrolls it and ink's cursor model never re-syncs, stranding the
+   * input above the bottom row. */
+  ed: EditorState
+  setEd: Dispatch<SetStateAction<EditorState>>
+  /** Completion menu state, lifted to App for the same reason. */
+  menu: Menu | null
+  setMenu: Dispatch<SetStateAction<Menu | null>>
   listCommands(): readonly MenuEntry[]
   runCommand(line: string): void
   /** Attaches extracted drop paths to the next message (terminal file-drop). */
@@ -59,8 +66,6 @@ export interface InputBoxProps {
   onClipboardImage(data: Uint8Array, name: string): void
   onInterrupt(): void
   onExit(): void
-  /** Reports the box's rendered row count (feeds the splash filler budget). */
-  onHeightChange?: (rows: number) => void
 }
 
 export interface EditorState {
@@ -79,11 +84,11 @@ export const draftCapture: { state: EditorState | null } = { state: null }
 
 /** One rendered menu line: a selectable entry, or a non-selectable section
  * header (the skill group) that still occupies a visible slot. */
-type MenuRow =
+export type MenuRow =
   | { readonly type: 'header'; readonly label: string }
   | { readonly type: 'entry'; readonly label: string; readonly description: string; readonly skill: boolean }
 
-interface Menu {
+export interface Menu {
   kind: 'commands' | 'files'
   query: string
   /** Rendered lines in order, headers included — the window slides over rows. */
@@ -109,42 +114,16 @@ const MAX_FILE_MATCHES = 60
 const MENU_DESC_COLUMNS = 40
 
 export function InputBox(props: InputBoxProps): ReactElement {
-  const { store, history, frozen, questionFreeText, seed, restore, pendingImages, listCommands, runCommand, onSubmit, onRecallPending, onClipboardImage, onDropFiles, onInterrupt, onExit, onHeightChange } = props
-  const [ed, setEd] = useState<EditorState>(() => restore ?? seedToState(seed))
+  const { store, history, frozen, questionFreeText, showFreeTextHint, pendingImages, ed, setEd, menu, setMenu, listCommands, runCommand, onSubmit, onRecallPending, onClipboardImage, onDropFiles, onInterrupt, onExit } = props
   const [histIdx, setHistIdx] = useState(-1)
   const [draft, setDraft] = useState<string | null>(null)
-  const [menu, setMenu] = useState<Menu | null>(null)
   const menuIndexRef = useRef(0)
   const menuScrollRef = useRef(0)
   const dismissedQueryRef = useRef<string | null>(null)
-  const reportedHeightRef = useRef(-1)
 
   const isEmpty = ed.lines.length === 1 && ed.lines[0] === ''
   const { stdout } = useStdout()
   const termColumns = Math.max(24, stdout?.columns !== undefined && stdout.columns > 0 ? stdout.columns : 80)
-
-  // Report the rendered row count (borders + wrapped editor lines + hints +
-  // menu) so App's splash filler can absorb height changes without scrolling.
-  // Must be the exact rendered height: the first frame's scroll budget depends
-  // on it. Long editor lines wrap inside the border box at its inner width
-  // (columns − 4), so the wrapped row count — not the line count — is what
-  // occupies rows.
-  useLayoutEffect(() => {
-    const menuOpen = menu !== null && menu.rows.length > 0
-    const inner = Math.max(8, termColumns - 4)
-    const editorRows = ed.lines.reduce((n, line) => n + textRows(line === '' ? ' ' : line, inner), 0)
-    const h = 2 + editorRows +
-      (pendingImages.length > 0
-        ? textRows(`📎 已附加 ${pendingImages.length} 张图片，将随下一条消息发送`, inner) +
-          textRows(trayDetailText(pendingImages), inner)
-        : 0) +
-      (questionFreeText && isEmpty && histIdx === -1 ? textRows('输入你的回答，Enter 提交（Esc 跳过）…', inner) : 0) +
-      (menuOpen ? MENU_SLOTS + 3 : 0)
-    if (h !== reportedHeightRef.current) {
-      reportedHeightRef.current = h
-      onHeightChange?.(h)
-    }
-  })
 
   // Mirror the live editor state into the module-level capture on every render
   // so a resize rebuild can remount with the draft (and cursor) intact.
@@ -670,27 +649,27 @@ export function InputBox(props: InputBoxProps): ReactElement {
         // `height` style: a fixed-height column box mis-measures its text
         // children in ink 7's first layout pass (siblings get overlapping
         // positions and render on top of each other), while the natural
-        // content height is already constant here.
+        // content height is already constant here. Every row is truncated to
+        // the pane's inner width — a wrapped row would corrupt the fixed slot
+        // budget the filler was computed from.
         <Box flexDirection="column" borderStyle="round" borderColor={theme.muted} paddingX={1}>
           {Array.from({ length: MENU_SLOTS }, (_, line) => {
             const row = menu.rows[menu.scroll + line]
             if (row === undefined) return <Text key={`blank-${line}`}>{' '}</Text>
             if (row.type === 'header') {
-              return <Text key={`header-${line}`} dimColor>{`— ${row.label} —`}</Text>
+              return <Text key={`header-${line}`} dimColor>{truncateLine(`— ${row.label} —`, termColumns - 4)}</Text>
             }
             return (
               <Text key={row.label} inverse={menu.scroll + line === menu.index}>
-                {`${row.label}${row.description !== '' ? `  ${row.description}` : ''}`}
+                {truncateLine(menuRowText(row), termColumns - 4)}
               </Text>
             )
           })}
-          <Text dimColor>{menuHint(menu)}</Text>
+          <Text dimColor>{truncateLine(menuHint(menu), termColumns - 4)}</Text>
         </Box>
       )}
       <Box flexDirection="column" borderStyle="round" borderColor={frozen ? theme.muted : theme.accent} paddingX={1}>
-        {isEmpty && histIdx === -1 && questionFreeText && (
-          <Text dimColor>输入你的回答，Enter 提交（Esc 跳过）…</Text>
-        )}
+        {showFreeTextHint && <Text dimColor>{FREE_TEXT_HINT}</Text>}
         {pendingImages.length > 0 && (
           <>
             <Text color={theme.approval}>{`📎 已附加 ${pendingImages.length} 张图片，将随下一条消息发送`}</Text>
@@ -709,11 +688,52 @@ export function InputBox(props: InputBoxProps): ReactElement {
   )
 }
 
-function seedToState(seed: string | undefined): EditorState {
+/** Visible text of one completion row: label + two-space gap + description. */
+export function menuRowText(row: MenuRow): string {
+  return row.type === 'header' ? `— ${row.label} —` : `${row.label}${row.description !== '' ? `  ${row.description}` : ''}`
+}
+
+export function seedToState(seed: string | undefined): EditorState {
   if (seed === undefined || seed === '') return { lines: [''], row: 0, col: 0 }
   const lines = seed.split('\n')
   const last = lines[lines.length - 1] ?? ''
   return { lines, row: lines.length - 1, col: Array.from(last).length }
+}
+
+/** Placeholder shown in an empty editor while a free-text question is open. */
+export const FREE_TEXT_HINT = '输入你的回答，Enter 提交（Esc 跳过）…'
+
+/** Rows the pending-image tray occupies inside the editor border (0 when empty).
+ * Shared by the render and the height estimate so the filler budget matches
+ * exactly what will be drawn. */
+export function imageTrayRows(images: readonly PendingImage[], columns: number): number {
+  if (images.length === 0) return 0
+  const inner = Math.max(8, columns - 4)
+  return textRows(`📎 已附加 ${images.length} 张图片，将随下一条消息发送`, inner) +
+    textRows(trayDetailText(images), inner)
+}
+
+/**
+ * The input box's exact rendered row count: borders + wrapped editor rows +
+ * optional attachment tray / free-text hint / completion pane. App calls this
+ * in its render body so the splash-filler budget is computed in the SAME
+ * commit that paints the input — a height that reaches the budget one paint
+ * later (the old useLayoutEffect report) draws an oversized frame first, the
+ * terminal scrolls it, and ink's incremental renderer never re-syncs its
+ * cursor model, leaving the input stranded above the bottom row.
+ */
+export function computeInputHeight(state: {
+  lines: readonly string[]
+  menuOpen: boolean
+  trayRows: number
+  freeTextHint: boolean
+  columns: number
+}): number {
+  const inner = Math.max(8, state.columns - 4)
+  const editorRows = state.lines.reduce((n, line) => n + textRows(line === '' ? ' ' : line, inner), 0)
+  return 2 + editorRows + state.trayRows +
+    (state.freeTextHint ? textRows(FREE_TEXT_HINT, inner) : 0) +
+    (state.menuOpen ? MENU_SLOTS + 3 : 0)
 }
 
 /**

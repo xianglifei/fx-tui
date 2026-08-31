@@ -17,6 +17,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionEvent, TodoItem } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswer, AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
+import stringWidth from 'string-width'
 
 // -- Transcript items ---------------------------------------------------------
 
@@ -924,31 +925,14 @@ export function formatToolArgs(args: string, limit: number): string {
 
 function truncateLine(line: string, width: number): string {
   if (line === '') return ''
+  if (stringWidth(line) <= width) return line
   let out = ''
   let w = 0
   for (const ch of Array.from(line)) {
-    const cw = charWidth(ch)
+    const cw = stringWidth(ch)
     if (w + cw > width) return `${out}…`
     out += ch
     w += cw
   }
   return out
-}
-
-function charWidth(ch: string): number {
-  const code = ch.codePointAt(0) ?? 0
-  if (
-    (code >= 0x1100 && code <= 0x115f) ||
-    (code >= 0x2e80 && code <= 0xa4cf) ||
-    (code >= 0xac00 && code <= 0xd7a3) ||
-    (code >= 0xf900 && code <= 0xfaff) ||
-    (code >= 0xfe30 && code <= 0xfe6f) ||
-    (code >= 0xff00 && code <= 0xff60) ||
-    (code >= 0xffe0 && code <= 0xffe6) ||
-    (code >= 0x20000 && code <= 0x2fffd) ||
-    (code >= 0x30000 && code <= 0x3fffd)
-  ) {
-    return 2
-  }
-  return 1
 }

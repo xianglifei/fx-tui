@@ -4,10 +4,12 @@
  * and the input editor.
  */
 
+import { appendFileSync } from 'node:fs'
 import { useSyncExternalStore } from 'react'
 import { useLayoutEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { Box, Static, Text, useInput, useStdout } from 'ink'
+import { Box, Static, Text, useInput, useStdout, measureElement } from 'ink'
+import type { DOMElement } from 'ink'
 import type {
   ActiveQuestion,
   ApprovalMode,
@@ -23,8 +25,10 @@ import type { EditorState, MenuEntry } from './Input.js'
 import { renderFileDiffs } from '../diff.js'
 import { renderMarkdownLines } from '../markdown.js'
 import { BANNER_BOX_HEIGHT, WelcomeBanner } from './Banner.js'
-import { estimateApprovalHeight, estimateItemHeight, estimateQuestionHeight, formatElapsed, truncateLine, userBarRows } from './estimate.js'
+import { estimateApprovalHeight, estimateItemHeight, estimateQuestionHeight, formatElapsed, questionHintText, truncateLine, userBarRows } from './estimate.js'
+import { computeInputHeight, imageTrayRows, seedToState } from './Input.js'
 import { InputBox } from './Input.js'
+import type { Menu } from './Input.js'
 import type { SubmitOptions } from './Input.js'
 import { StatusBar } from './StatusBar.js'
 import { theme } from './theme.js'
@@ -36,7 +40,7 @@ export interface AppActions {
   onDroppedFiles(paths: readonly string[]): void
   /** Attaches a clipboard image (PNG bytes + display name). */
   onClipboardImage(data: Uint8Array, name: string): void
-  /** Recalls the newest unclaimed message into the editor; null when none pending. */
+  /** Recalls the newest unclaimed message back into the editor; null when none pending. */
   onRecallPending(): string | null
   onInterrupt(): void
   onExit(): void
@@ -56,8 +60,17 @@ export interface AppProps {
    * first frame taller than the viewport (an overflow would scroll the
    * replayed transcript's head into scrollback). */
   rebuilding?: boolean
-  /** Exact editor height for a restored draft (rebuild first frame). */
-  initialInputHeight?: number
+}
+
+/** Frame-overflow diagnostics, mirroring index.ts's debugLog channel: an
+ * over-viewport dynamic frame is a rendering bug (the terminal scrolls it and
+ * ink's cursor model desyncs — the "input box jumped up" family), so every
+ * occurrence is worth a line in /tmp/fx-debug.log under FX_TUI_DEBUG. */
+function frameDebug(label: string, data: Record<string, unknown>): void {
+  if (process.env.FX_TUI_DEBUG === undefined) return
+  try {
+    appendFileSync('/tmp/fx-debug.log', `${Date.now()} ${label} ${JSON.stringify(data)}\n`)
+  } catch { /* debug logging is best-effort */ }
 }
 
 export function App(props: AppProps): ReactElement {
@@ -72,11 +85,14 @@ export function App(props: AppProps): ReactElement {
   const bannerWidth = termColumns
   const frozen = snap.approval !== null || (snap.question !== null && !snap.questionFreeText)
 
-  // Matches InputBox's reported height for an empty single-line editor, so
-  // the first paint already has the final filler and no second frame scrolls.
-  // A resize rebuild passes the exact restored-draft height instead, since a
-  // multi-line draft would otherwise make the first frame overflow.
-  const [inputHeight, setInputHeight] = useState(props.initialInputHeight ?? 3)
+  // The editor state and completion menu live HERE, not in InputBox: the
+  // splash-filler budget must be computed from the input's height in the same
+  // commit that paints the input. A height reported from a child's layout
+  // effect arrives one paint late — the oversized intermediate frame scrolls
+  // the terminal, and ink's incremental renderer never re-syncs, which is
+  // exactly the "input box jumps up" failure family (see docs/ui-research-2026-08.md).
+  const [ed, setEd] = useState<EditorState>(() => props.restore ?? seedToState(props.seed))
+  const [menu, setMenu] = useState<Menu | null>(null)
   // Cleared after the first commit so the rebuild-only filler slack applies
   // exactly once — later frames re-measure everything themselves.
   const firstFrameRef = useRef(true)
@@ -89,9 +105,32 @@ export function App(props: AppProps): ReactElement {
   // app scrolls like a normal terminal transcript and the banner erodes into
   // scrollback line by line. Sizing errs on the small side: a short filler
   // only leaves a harmless gap above the status bar, while an oversized one
-  // would push the frame top into the static region and erase transcript rows.
+  // would push the frame top into the Static region and erase transcript rows.
   const rebuildSlack = props.rebuilding === true && firstFrameRef.current ? 2 : 0
+  const isEmpty = ed.lines.length === 1 && ed.lines[0] === ''
+  const inputHeight = computeInputHeight({
+    lines: ed.lines,
+    menuOpen: menu !== null && menu.rows.length > 0,
+    trayRows: imageTrayRows(snap.pendingImages, termColumns),
+    // An empty editor can only be un-browsing history (history entries are
+    // never empty), so the hint needs no history-cursor knowledge here.
+    freeTextHint: snap.questionFreeText && isEmpty,
+    columns: termColumns,
+  })
   const { filler, live } = computeFiller(snap as Snapshot, width, termColumns, rows, inputHeight, rebuildSlack)
+
+  // Flicker detector (Gemini CLI's useFlickerDetector): a dynamic frame taller
+  // than the viewport means some height estimate missed — ink will scroll the
+  // overflow and strand the input box. Measured in a layout effect, when yoga
+  // has already laid out this commit's tree.
+  const liveRegionRef = useRef<DOMElement>(null)
+  useLayoutEffect(() => {
+    if (rows === undefined || rows <= 0 || rows >= 1000) return
+    const node = liveRegionRef.current
+    if (node === null) return
+    const { height } = measureElement(node)
+    if (height > rows) frameDebug('frame-overflow', { height, rows, version: snap.version })
+  })
   useLayoutEffect(() => {
     firstFrameRef.current = false
   })
@@ -107,7 +146,7 @@ export function App(props: AppProps): ReactElement {
           />
         )}
       </Static>
-      <Box flexDirection="column">
+      <Box ref={liveRegionRef} flexDirection="column">
         {filler > 0 && Array.from({ length: filler }, (_, index) => (
           <Text key={`filler-${index}`}>{' '}</Text>
         ))}
@@ -120,14 +159,17 @@ export function App(props: AppProps): ReactElement {
           <QuestionView store={props.store} question={snap.question} width={width} />
         )}
         {snap.question !== null && snap.questionFreeText && (
-          <FreeTextQuestionView question={snap.question} />
+          <FreeTextQuestionView question={snap.question} columns={termColumns} />
         )}
         {snap.todos.length > 0 && <TodoPanel todos={snap.todos} width={width} />}
         {snap.queuedMessages.length > 0 && (
           <Box flexDirection="column">
             {snap.queuedMessages.slice(0, 5).map((message, index) => (
               <Text key={message.id} color={theme.warning} dimColor>
-                {`${message.mode === 'steer' ? '🧭 已注入（下一步生效）' : '⏳ 已排队（下一轮生效）'}${snap.queuedMessages.length > 1 ? `（${index + 1}/${snap.queuedMessages.length}）` : ''}：${truncateLine(message.text, width - 12)}`}
+                {truncateLine(
+                  `${message.mode === 'steer' ? '🧭 已注入（下一步生效）' : '⏳ 已排队（下一轮生效）'}${snap.queuedMessages.length > 1 ? `（${index + 1}/${snap.queuedMessages.length}）` : ''}：${message.text}`,
+                  termColumns,
+                )}
               </Text>
             ))}
             {snap.queuedMessages.length > 5 && (
@@ -150,9 +192,12 @@ export function App(props: AppProps): ReactElement {
           history={props.history}
           frozen={frozen}
           questionFreeText={snap.question !== null && snap.questionFreeText}
-          seed={props.seed}
-          restore={props.restore}
+          showFreeTextHint={snap.questionFreeText && isEmpty}
           pendingImages={snap.pendingImages}
+          ed={ed}
+          setEd={setEd}
+          menu={menu}
+          setMenu={setMenu}
           listCommands={props.listCommands}
           runCommand={props.actions.runCommand}
           onSubmit={props.actions.onSubmit}
@@ -161,9 +206,8 @@ export function App(props: AppProps): ReactElement {
           onDropFiles={props.actions.onDroppedFiles}
           onInterrupt={props.actions.onInterrupt}
           onExit={props.actions.onExit}
-          onHeightChange={setInputHeight}
         />
-        <ModeLine mode={snap.approvalMode} />
+        <ModeLine mode={snap.approvalMode} columns={termColumns} />
         {snap.exitArmed && <Text color={theme.danger}>再按一次 Ctrl+C 退出 fx-tui</Text>}
       </Box>
     </Box>
@@ -236,8 +280,10 @@ function FinalItemView(props: { item: FinalItem; width: number }): ReactElement 
 }
 
 function PendingToolView(props: { tool: PendingTool; width: number }): ReactElement {
+  // Truncated to one row: the filler budget counts one row per pending tool,
+  // so a wrapped title would push the frame past its budget.
   return (
-    <Text color={theme.warning}>{`⚙ ${props.tool.title} 运行中…`}</Text>
+    <Text color={theme.warning}>{`⚙ ${truncateLine(props.tool.title, props.width - 10)} 运行中…`}</Text>
   )
 }
 
@@ -455,22 +501,20 @@ function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width:
         )
       })}
       <Text dimColor>
-        {isPlanReview
-          ? 'Enter 批准 · 数字键选择其他选项 · Esc 跳过'
-          : item.multiSelect === true
-            ? '数字键多选 · Enter 确认 · Esc 跳过'
-            : '数字键选择 · Enter 确认 · Esc 跳过'}
+        {questionHintText(isPlanReview, item.multiSelect === true)}
       </Text>
     </Box>
   )
 }
 
-function FreeTextQuestionView(props: { question: ActiveQuestion }): ReactElement {
+function FreeTextQuestionView(props: { question: ActiveQuestion; columns: number }): ReactElement {
   const item = props.question.item
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={theme.info} paddingX={1}>
       <Text color={theme.info} bold>{`问 题：${item.question}`}</Text>
-      {item.detail !== undefined && item.detail !== '' && <Text dimColor>{item.detail}</Text>}
+      {/* One row by truncation: the estimator budgets the detail as a single
+       * line, so an unwrapped long detail would overflow the frame. */}
+      {item.detail !== undefined && item.detail !== '' && <Text dimColor>{truncateLine(item.detail, props.columns - 4)}</Text>}
       <Text dimColor>在下方输入框中输入回答，Enter 提交</Text>
     </Box>
   )
@@ -495,11 +539,12 @@ function TodoPanel(props: { todos: readonly { content: string; status: 'pending'
 }
 
 /** The permission-mode hint under the input box, Claude-Code style: the
- * current stance is always visible and the Shift+Tab cycle is advertised. */
-function ModeLine(props: { mode: ApprovalMode }): ReactElement {
+ * current stance is always visible and the Shift+Tab cycle is advertised.
+ * Truncated to one row — the filler budget counts this line as exactly 1. */
+function ModeLine(props: { mode: ApprovalMode; columns: number }): ReactElement {
   return props.mode === 'auto'
-    ? <Text color={theme.warning}>⏵⏵ 自动允许模式已开启（shift+tab 切换）</Text>
-    : <Text dimColor>权限模式：每次询问（shift+tab 切换自动允许）</Text>
+    ? <Text color={theme.warning}>{truncateLine('⏵⏵ 自动允许模式已开启（shift+tab 切换）', props.columns)}</Text>
+    : <Text dimColor>{truncateLine('权限模式：每次询问（shift+tab 切换自动允许）', props.columns)}</Text>
 }
 
 function StreamView(props: { text: string; width: number }): ReactElement {

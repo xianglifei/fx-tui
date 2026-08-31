@@ -144,8 +144,23 @@ export function estimateQuestionHeight(question: ActiveQuestion, width: number, 
       (option.description !== undefined ? ` — ${option.description}` : '')
     h += textRows(row, inner)
   })
-  return h + 1 // hint row
+  return h + textRows(questionHintText(isPlanReview, item.multiSelect === true), inner)
 }
+
+/** The question card's footer hint; the view and this estimator must render
+ * the same string so the wrapped row count matches the budget. */
+export function questionHintText(isPlanReview: boolean, multiSelect: boolean): string {
+  return isPlanReview
+    ? 'Enter 批准 · 数字键选择其他选项 · Esc 跳过'
+    : multiSelect
+      ? '数字键多选 · Enter 确认 · Esc 跳过'
+      : '数字键选择 · Enter 确认 · Esc 跳过'
+}
+
+/** The approval card's choice line as one plain string; ApprovalView renders
+ * the same text as colored segments, and the estimator budgets its wrapped
+ * rows (it can wrap on narrow terminals — a flat +1 would under-count). */
+export const APPROVAL_CHOICES_TEXT = '[y] 允许一次  [s] 本会话不再问  [a] 总是允许（记住）  [n] 拒绝'
 
 /** Estimated rows of the approval prompt (== actual). */
 export function estimateApprovalHeight(prompt: ApprovalPrompt, columns: number): number {
@@ -153,7 +168,7 @@ export function estimateApprovalHeight(prompt: ApprovalPrompt, columns: number):
   let h = 2 + textRows(`需要批准：${prompt.toolName}`, inner)
   if (prompt.command !== undefined && prompt.command !== '') h += textRows(`  ${prompt.command}`, inner)
   if (prompt.reason !== '') h += textRows(prompt.reason, inner)
-  return h + 1 // choice row
+  return h + textRows(APPROVAL_CHOICES_TEXT, inner)
 }
 
 export function formatElapsed(ms: number): string {
@@ -164,31 +179,14 @@ export function formatElapsed(ms: number): string {
 
 export function truncateLine(line: string, width: number): string {
   if (line === '') return ''
+  if (stringWidth(line) <= width) return line
   let out = ''
   let w = 0
   for (const ch of Array.from(line)) {
-    const cw = charWidth(ch)
+    const cw = stringWidth(ch)
     if (w + cw > width) return `${out}…`
     out += ch
     w += cw
   }
   return out
-}
-
-function charWidth(ch: string): number {
-  const code = ch.codePointAt(0) ?? 0
-  if (
-    (code >= 0x1100 && code <= 0x115f) ||
-    (code >= 0x2e80 && code <= 0xa4cf) ||
-    (code >= 0xac00 && code <= 0xd7a3) ||
-    (code >= 0xf900 && code <= 0xfaff) ||
-    (code >= 0xfe30 && code <= 0xfe6f) ||
-    (code >= 0xff00 && code <= 0xff60) ||
-    (code >= 0xffe0 && code <= 0xffe6) ||
-    (code >= 0x20000 && code <= 0x2fffd) ||
-    (code >= 0x30000 && code <= 0x3fffd)
-  ) {
-    return 2
-  }
-  return 1
 }

@@ -59,9 +59,8 @@ import { InputHistory } from './history.js'
 import { NOTIFY_MIN_TURN_MS, notifyTurnComplete, notifyModeLabel } from './notify.js'
 import type { NotifyMode } from './notify.js'
 import { App } from './ui/App.js'
-import { draftCapture, trayDetailText } from './ui/Input.js'
+import { draftCapture } from './ui/Input.js'
 import type { MenuEntry } from './ui/Input.js'
-import { textRows } from './ui/ink-text.js'
 import { truncateLine } from './ui/estimate.js'
 import { renderMarkdownLines } from './markdown.js'
 import { activeThemeName, resolveTheme, setActiveTheme, themeDisplayLabel, GHOSTTY_PICKER_ENTRIES } from './ui/theme.js'
@@ -70,7 +69,7 @@ import type { GhosttyThemeId } from './ui/ghostty-themes.js'
 import { installedRoot, performSelfUpdate } from './update.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.17.0'
+export const FX_TUI_VERSION = '0.18.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
@@ -1612,21 +1611,9 @@ function bottomFlush(): void {
       homeCursor()
       mountedCols = out.columns
       mountedRows = out.rows
-      // Exact first-frame editor height: the default estimate (empty editor)
-      // would under-count a restored multi-line draft or the image tray; a
-      // first frame taller than the viewport would push the banner's top edge
-      // out of view instead of pinning it to the viewport top.
+      // The restored draft rides through draftCapture; App derives its own
+      // first-frame input height from it (same commit as the filler budget).
       const restore = draftCapture.state ?? undefined
-      const inner = Math.max(8, out.columns - 4)
-      const pendingImages = store.getSnapshot().pendingImages
-      const initialInputHeight = 2 +
-        (restore !== undefined
-          ? restore.lines.reduce((n, line) => n + textRows(line === '' ? ' ' : line, inner), 0)
-          : 1) +
-        (pendingImages.length > 0
-          ? textRows(`📎 已附加 ${pendingImages.length} 张图片，将随下一条消息发送`, inner) +
-            textRows(trayDetailText(pendingImages), inner)
-          : 0)
       instance = render(
         createElement(App, {
           store,
@@ -1635,7 +1622,6 @@ function bottomFlush(): void {
           listCommands,
           restore,
           rebuilding: true,
-          initialInputHeight,
         }),
         { exitOnCtrlC: false, incrementalRendering: true },
       )
