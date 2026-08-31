@@ -187,6 +187,7 @@ export class TuiStore {
   private lastUsage: TokenUsage | null = null
   private streamStartMs: number | null = null
   private verboseToolDetail = false
+  private turnToolCalls = 0
   private exitArmed = false
   private exitTimer: ReturnType<typeof setTimeout> | null = null
   private echoedId: string | null = null
@@ -285,6 +286,7 @@ export class TuiStore {
         this.phase = 'thinking'
         this.phaseDetail = ''
         this.resetReasoning()
+        this.turnToolCalls = 0
         break
       }
       case 'step/start': {
@@ -395,6 +397,7 @@ export class TuiStore {
             })
           : undefined
         const exit = view?.card === 'terminal' ? view : undefined
+        this.turnToolCalls += 1
         this.items.push({
           kind: 'tool',
           name: pending?.name ?? '(unknown tool)',
@@ -433,6 +436,12 @@ export class TuiStore {
         this.phaseDetail = ''
         this.resetReasoning()
         this.streamStartMs = null
+        // A dim one-line closure marker for tool-heavy turns; single-tool
+        // turns stay quiet.
+        if (!this.replaying && this.turnToolCalls >= 2) {
+          this.items.push({ kind: 'notice', tone: 'info', text: `本轮共 ${this.turnToolCalls} 次工具调用` })
+        }
+        this.turnToolCalls = 0
         if (ev.data.reason.kind === 'aborted' && this.queuedMessages.length > 0) {
           // A user cancel clears queued inbox work; reflect the drop.
           this.items.push({
@@ -552,6 +561,7 @@ export class TuiStore {
     this.queuedMessages = []
     this.todos = []
     this.childAgentCount = 0
+    this.turnToolCalls = 0
     this.streamBuf = ''
     this.streamText = ''
     this.phase = 'idle'

@@ -16,6 +16,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Dispatch, ReactElement, SetStateAction } from 'react'
 import { Box, Text, useInput, usePaste, useStdout } from 'ink'
+import stringWidth from 'string-width'
 import type { PendingImage, TuiStore } from '../store.js'
 import { readClipboardImage, readClipboardText } from '../clipboard.js'
 import { isExistingImagePath, parsePathChunk } from '../path-drops.js'
@@ -83,10 +84,19 @@ export interface EditorState {
 export const draftCapture: { state: EditorState | null } = { state: null }
 
 /** One rendered menu line: a selectable entry, or a non-selectable section
- * header (the skill group) that still occupies a visible slot. */
+ * header (the skill group) that still occupies a visible slot. Entries carry
+ * the fuzzy-match hit positions (character indices into `label`, rendered
+ * bold) and the untruncated description for ←→ expansion. */
 export type MenuRow =
   | { readonly type: 'header'; readonly label: string }
-  | { readonly type: 'entry'; readonly label: string; readonly description: string; readonly skill: boolean }
+  | {
+    readonly type: 'entry'
+    readonly label: string
+    readonly description: string
+    readonly skill: boolean
+    readonly hits?: readonly number[]
+    readonly fullDescription?: string
+  }
 
 export interface Menu {
   kind: 'commands' | 'files'
@@ -97,6 +107,9 @@ export interface Menu {
   index: number
   /** First visible row of the MENU_SLOTS-tall sliding window over rows. */
   scroll: number
+  /** Commands menu only: ←→ toggles the description between the 40-column
+   * teaser and the full text (still single-row, truncated to the pane). */
+  expanded: boolean
 }
 
 const HELP_TEXT =
@@ -120,6 +133,8 @@ export function InputBox(props: InputBoxProps): ReactElement {
   const menuIndexRef = useRef(0)
   const menuScrollRef = useRef(0)
   const dismissedQueryRef = useRef<string | null>(null)
+  /** ←→ description-expansion flag, keyed by the query it belongs to. */
+  const expandRef = useRef<{ query: string; expanded: boolean }>({ query: '', expanded: false })
 
   const isEmpty = ed.lines.length === 1 && ed.lines[0] === ''
   const { stdout } = useStdout()
@@ -149,15 +164,36 @@ export function InputBox(props: InputBoxProps): ReactElement {
         setMenu(null)
         return
       }
+      // Fuzzy ranking (Codex's popup order): exact-prefix matches first in
+      // registry order, then in-order subsequence matches — "dk" surfaces
+      // /doctor. Hits are label character indices (label = '/' + name).
+      const queryChars = Array.from(query).length
+      const scored: Array<{ entry: MenuEntry; tier: number; score: number; hits: number[]; order: number }> = []
+      for (const [order, entry] of listCommands().entries()) {
+        if (query === '') {
+          scored.push({ entry, tier: 0, score: 0, hits: [], order })
+          continue
+        }
+        if (entry.name.toLowerCase().startsWith(query)) {
+          scored.push({ entry, tier: 0, score: 0, hits: Array.from({ length: queryChars }, (_, i) => i + 1), order })
+          continue
+        }
+        const fuzzy = fuzzySubsequence(entry.name, query)
+        if (fuzzy !== undefined) {
+          scored.push({ entry, tier: 1, score: fuzzy.score, hits: fuzzy.hits.map(i => i + 1), order })
+        }
+      }
+      scored.sort((a, b) => a.tier - b.tier || a.score - b.score || a.order - b.order)
       const commands: MenuRow[] = []
       const skills: MenuRow[] = []
-      for (const entry of listCommands()) {
-        if (!entry.name.toLowerCase().startsWith(query)) continue
+      for (const { entry, hits } of scored) {
         const row: MenuRow = {
           type: 'entry',
           label: `/${entry.name}`,
           description: truncateLine(entry.description, MENU_DESC_COLUMNS),
           skill: entry.kind === 'skill',
+          hits,
+          fullDescription: entry.description,
         }
         ;(entry.kind === 'skill' ? skills : commands).push(row)
       }
@@ -171,10 +207,16 @@ export function InputBox(props: InputBoxProps): ReactElement {
         setMenu(null)
         return
       }
+      // Expansion survives re-derivations that did not change the query (a
+      // cursor move, a refetch); typing a new query collapses it again. The
+      // flag rides a ref keyed by query — `menu` must NOT join the deps (the
+      // effect rewrites the menu object; a menu dep would loop forever).
+      const expanded = expandRef.current.query === query ? expandRef.current.expanded : false
+      expandRef.current = { query, expanded }
       const index = clampToEntryRow(rows, menuIndexRef.current)
       const scroll = clampScroll(menuScrollRef.current, index, rows.length)
       menuScrollRef.current = scroll
-      setMenu({ kind: 'commands', query, rows, index, scroll })
+      setMenu({ kind: 'commands', query, rows, index, scroll, expanded })
       return
     }
 
@@ -198,7 +240,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
         const index = clampToEntryRow(rows, Math.min(menuIndexRef.current, rows.length - 1))
         const scroll = clampScroll(menuScrollRef.current, index, rows.length)
         menuScrollRef.current = scroll
-        setMenu({ kind: 'files', query, rows, index, scroll })
+        setMenu({ kind: 'files', query, rows, index, scroll, expanded: false })
       })
       return () => { cancelled = true }
     }
@@ -273,6 +315,16 @@ export function InputBox(props: InputBoxProps): ReactElement {
         menuScrollRef.current = clampScroll(menu.scroll, index, menu.rows.length)
         setMenu({ ...menu, index, scroll: menuScrollRef.current })
         return
+      }
+      if (key.leftArrow || key.rightArrow) {
+        // Commands menu only: ←→ toggles the description between the teaser
+        // and the full text. The @ menu keeps the arrows for cursor movement
+        // — there they change the @-word and the query itself.
+        if (menu.kind === 'commands') {
+          expandRef.current = { query: menu.query, expanded: !menu.expanded }
+          setMenu({ ...menu, expanded: expandRef.current.expanded })
+          return
+        }
       }
       if (key.tab) {
         const row = menu.rows[menu.index]!
@@ -661,7 +713,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
             }
             return (
               <Text key={row.label} inverse={menu.scroll + line === menu.index}>
-                {truncateLine(menuRowText(row), termColumns - 4)}
+                <MenuEntryText row={row} expanded={menu.expanded} innerWidth={termColumns - 4} />
               </Text>
             )
           })}
@@ -688,9 +740,38 @@ export function InputBox(props: InputBoxProps): ReactElement {
   )
 }
 
-/** Visible text of one completion row: label + two-space gap + description. */
-export function menuRowText(row: MenuRow): string {
-  return row.type === 'header' ? `— ${row.label} —` : `${row.label}${row.description !== '' ? `  ${row.description}` : ''}`
+/** One completion row's visible text: fuzzy-hit-bolded label + two-space gap
+ * + description, composed so the total never exceeds the pane's inner width
+ * (a wrapped row would corrupt the fixed slot budget the filler was computed
+ * from). With ←→ expansion the description shows in full — still truncated
+ * to the space left beside the label. */
+function MenuEntryText(props: { row: Extract<MenuRow, { type: 'entry' }>; expanded: boolean; innerWidth: number }): ReactElement {
+  const { row, expanded, innerWidth } = props
+  const labelWidth = stringWidth(row.label)
+  const descSource = expanded && row.fullDescription !== undefined ? row.fullDescription : row.description
+  const descWidth = Math.max(0, innerWidth - labelWidth - 2)
+  const desc = descWidth > 0 ? truncateLine(descSource, descWidth) : ''
+  const label = desc !== '' ? row.label : truncateLine(row.label, innerWidth)
+  return (
+    <>
+      <HitLabel label={label} hits={row.hits ?? []} />
+      {desc !== '' && `  ${desc}`}
+    </>
+  )
+}
+
+/** Label text with the fuzzy-match characters bolded. */
+function HitLabel(props: { label: string; hits: readonly number[] }): ReactElement {
+  const chars = Array.from(props.label)
+  const hits = new Set(props.hits)
+  const runs: Array<{ text: string; hit: boolean }> = []
+  for (const [index, ch] of chars.entries()) {
+    const hit = hits.has(index)
+    const last = runs[runs.length - 1]
+    if (last !== undefined && last.hit === hit) last.text += ch
+    else runs.push({ text: ch, hit })
+  }
+  return <>{runs.map((run, index) => <Text key={index} bold={run.hit}>{run.text}</Text>)}</>
 }
 
 export function seedToState(seed: string | undefined): EditorState {
@@ -736,6 +817,30 @@ export function computeInputHeight(state: {
     (state.menuOpen ? MENU_SLOTS + 3 : 0)
 }
 
+/** In-order subsequence match of `query` against a command name (case-insensitive).
+ * Score prefers contiguous runs, earlier hits, and tight spread; undefined = no match. */
+function fuzzySubsequence(name: string, query: string): { score: number; hits: number[] } | undefined {
+  const chars = Array.from(name.toLowerCase())
+  const hits: number[] = []
+  let score = 0
+  let searchFrom = 0
+  for (const ch of Array.from(query.toLowerCase())) {
+    let found = -1
+    for (let i = searchFrom; i < chars.length; i++) {
+      if (chars[i] === ch) {
+        found = i
+        break
+      }
+    }
+    if (found < 0) return undefined
+    if (hits.length > 0 && found === hits[hits.length - 1]! + 1) score -= 4
+    hits.push(found)
+    searchFrom = found + 1
+  }
+  score += hits[hits.length - 1]! - hits[0]! + hits[0]!
+  return { score, hits }
+}
+
 /**
  * Clamp a window offset so it stays inside the list and the highlighted row
  * stays visible. Sliding only happens at the window edges — an in-window move
@@ -776,7 +881,8 @@ function menuHint(menu: Menu): string {
   const position = entries > MENU_SLOTS
     ? `第 ${menu.rows.slice(0, menu.index + 1).filter(row => row.type === 'entry').length}/${entries} 项 · `
     : ''
-  return `${position}↑↓ 选择 · Tab 补全 · Enter ${menu.kind === 'commands' ? '执行/插入' : '补全'} · Esc 关闭`
+  const expand = menu.kind === 'commands' ? ' · ←→ 描述' : ''
+  return `${position}↑↓ 选择 · Tab 补全 · Enter ${menu.kind === 'commands' ? '执行/插入' : '补全'}${expand} · Esc 关闭`
 }
 
 /** Names of the queued images in the attachment tray; shared by the render and

@@ -151,9 +151,12 @@ export function App(props: AppProps): ReactElement {
         {filler > 0 && Array.from({ length: filler }, (_, index) => (
           <Text key={`filler-${index}`}>{' '}</Text>
         ))}
-        {snap.pendingTools.map((tool: PendingTool) => (
-          <PendingToolView key={tool.callId} tool={tool} width={width} />
-        ))}
+        {snap.pendingTools.length === 1 && <PendingToolView tool={snap.pendingTools[0]!} width={width} />}
+        {snap.pendingTools.length > 1 && (
+          // Codex's compact group display: parallel calls collapse to one
+          // running line; each settles into its own card on completion.
+          <Text color={theme.warning}>{truncateLine(`⚙ 并行运行 ${snap.pendingTools.length} 个工具…`, termColumns)}</Text>
+        )}
         {snap.streaming !== '' && <StreamView text={snap.streaming} width={width} />}
         {snap.approval !== null && <ApprovalView store={props.store} prompt={snap.approval} />}
         {snap.question !== null && !snap.questionFreeText && (
@@ -633,7 +636,7 @@ function computeFiller(
 
   const live =
     (snap.streaming !== '' ? renderMarkdownLines(snap.streaming, width).length + 1 : 0) + // reply + lead gap
-    snap.pendingTools.length +
+    (snap.pendingTools.length > 0 ? 1 : 0) + // one line, even for parallel calls
     (snap.approval !== null ? estimateApprovalHeight(snap.approval, columns) : 0) +
     (snap.question !== null ? estimateQuestionHeight(snap.question, width, columns) : 0) +
     (snap.todos.length > 0 ? 3 + Math.min(8, snap.todos.length) + (snap.todos.length > 8 ? 1 : 0) : 0) +
