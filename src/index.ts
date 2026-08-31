@@ -69,7 +69,7 @@ import type { GhosttyThemeId } from './ui/ghostty-themes.js'
 import { installedRoot, performSelfUpdate } from './update.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.18.0'
+export const FX_TUI_VERSION = '0.19.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
@@ -383,13 +383,14 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     { name: 'exit', description: '退出 fx-tui', kind: 'builtin' },
   ]
 
-  /** Interactive single-choice picker reusing the question UI; resolves undefined when skipped. */
+  /** Interactive single-choice picker reusing the question UI; resolves undefined when skipped.
+   * Options render in a scrolling window, so lists beyond nine no longer need slicing. */
   async function pick(title: string, options: readonly { label: string; description?: string }[]): Promise<string | undefined> {
     if (options.length === 0) return undefined
     const answer = await store.askQuestions([{
       id: `fx-tui-pick-${Date.now()}`,
       question: title,
-      options: options.slice(0, 9).map(option => ({
+      options: options.map(option => ({
         label: option.label,
         ...(option.description !== undefined ? { description: option.description } : {}),
       })),
@@ -438,7 +439,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     // with a large session corpus.
     const titleById = new Map<string, string>()
     try {
-      const observations = await ctx.sessionQuery.readTitleSnapshots(parents.slice(0, 40).map(record => record.header.id))
+      const observations = await ctx.sessionQuery.readTitleSnapshots(parents.slice(0, 100).map(record => record.header.id))
       for (const observation of observations) {
         if (observation.status === 'fulfilled' && observation.value.title !== undefined) {
           titleById.set(observation.sessionId, observation.value.title.title)
@@ -459,8 +460,9 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     }
     // Duplicate labels (same minute + directory) would make the picker's
     // label→record lookup ambiguous; a counter suffix keeps them unique.
+    // Bounded, not capped at the window: the question card scrolls.
     const seenLabels = new Map<string, number>()
-    const choices = filtered.slice(0, 9).map(record => {
+    const choices = filtered.slice(0, 100).map(record => {
       const created = new Date(record.header.createdAt)
       const stamp = `${created.getMonth() + 1}-${created.getDate()} ${String(created.getHours()).padStart(2, '0')}:${String(created.getMinutes()).padStart(2, '0')}`
       const dir = record.header.cwd !== undefined ? basename(record.header.cwd) : '?'
@@ -941,35 +943,16 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     void remountForThemeChange()
   }
 
-  /** Paged Ghostty picker: digit-key questions hold at most nine options, so
-   * the themes flow through 8-per-page questions with next/previous/back
-   * navigation entries. */
+  /** Ghostty picker: the question card scrolls, so all 14 themes fit in one
+   * flat list — the 8-per-page pagination the digit-key era needed is gone. */
   async function pickGhosttyTheme(): Promise<GhosttyThemeId | undefined> {
-    const PAGE_SIZE = 8
-    const pageCount = Math.ceil(GHOSTTY_PICKER_ENTRIES.length / PAGE_SIZE)
-    let page = 0
-    for (;;) {
-      const entries = GHOSTTY_PICKER_ENTRIES.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
-      const options: { label: string; description?: string }[] = entries.map(entry => ({
-        label: entry.name,
-        description: `${entry.dark ? '深色' : '浅色'} · ${entry.summary}`,
-      }))
-      if (page < pageCount - 1) options.push({ label: '▸ 下一页', description: `第 ${page + 2}/${pageCount} 页` })
-      if (page > 0) options.push({ label: '◂ 上一页', description: `第 ${page}/${pageCount} 页` })
-      options.push({ label: '◂ 返回基础选项' })
-      const chosen = await pick('Ghostty 精选主题（深色 10 · 浅色 4）', options)
-      if (chosen === undefined) return undefined
-      if (chosen === '▸ 下一页') {
-        page += 1
-        continue
-      }
-      if (chosen === '◂ 上一页') {
-        page -= 1
-        continue
-      }
-      if (chosen === '◂ 返回基础选项') return undefined
-      return entries.find(entry => entry.name === chosen)?.id
-    }
+    const options = GHOSTTY_PICKER_ENTRIES.map(entry => ({
+      label: entry.name,
+      description: `${entry.dark ? '深色' : '浅色'} · ${entry.summary}`,
+    }))
+    const chosen = await pick('Ghostty 精选主题（深色 10 · 浅色 4）', options)
+    if (chosen === undefined) return undefined
+    return GHOSTTY_PICKER_ENTRIES.find(entry => entry.name === chosen)?.id
   }
 
   /** `/theme`: interactive picker (base themes, or the paged Ghostty

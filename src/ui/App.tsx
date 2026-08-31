@@ -20,12 +20,12 @@ import type {
   TuiStore,
   ToolItem,
 } from '../store.js'
-import { formatToolArgs } from '../store.js'
+import { formatToolArgs, QUESTION_WINDOW } from '../store.js'
 import type { EditorState, MenuEntry } from './Input.js'
 import { renderFileDiffs } from '../diff.js'
 import { renderMarkdownLines } from '../markdown.js'
 import { BANNER_BOX_HEIGHT, WelcomeBanner } from './Banner.js'
-import { estimateApprovalHeight, estimateItemHeight, estimateQuestionHeight, formatElapsed, questionHintText, truncateLine, userBarRows } from './estimate.js'
+import { estimateApprovalHeight, estimateItemHeight, estimateQuestionHeight, formatElapsed, headTailPreview, questionHintText, questionOptionRow, truncateLine, userBarRows } from './estimate.js'
 import { computeInputHeight, imageTrayRows, seedToState } from './Input.js'
 import { InputBox } from './Input.js'
 import type { Menu } from './Input.js'
@@ -143,6 +143,7 @@ export function App(props: AppProps): ReactElement {
             key={index}
             item={item}
             width={item.kind === 'banner' || item.kind === 'user' ? bannerWidth : width}
+            columns={termColumns}
           />
         )}
       </Static>
@@ -221,8 +222,8 @@ function LeadGap(): ReactElement {
   return <Text>{' '}</Text>
 }
 
-function FinalItemView(props: { item: FinalItem; width: number }): ReactElement {
-  const { item, width } = props
+function FinalItemView(props: { item: FinalItem; width: number; columns: number }): ReactElement {
+  const { item, width, columns } = props
   switch (item.kind) {
     case 'banner':
       return <WelcomeBanner item={item} width={width} />
@@ -255,7 +256,7 @@ function FinalItemView(props: { item: FinalItem; width: number }): ReactElement 
       return (
         <Box flexDirection="column">
           <LeadGap />
-          <ToolCardView item={item} width={width} />
+          <ToolCardView item={item} columns={columns} />
         </Box>
       )
     case 'notice':
@@ -287,26 +288,33 @@ function PendingToolView(props: { tool: PendingTool; width: number }): ReactElem
   )
 }
 
-function ToolCardView(props: { item: ToolItem; width: number }): ReactElement {
-  const { item, width } = props
+/** Compact tool card (Codex-style): one status header line plus indented dim
+ * preview rows — no border box. Color marks STATE (green/red), not container;
+ * a card costs ~2 rows before its content instead of the bordered card's 4.
+ * Preview budgets: terminal/generic 5 lines, diff 8, search paths 3, web
+ * sources 3 (Ctrl+O raises them). Mirrored row-for-row by
+ * estimate.ts/estimateToolCardHeight. */
+function ToolCardView(props: { item: ToolItem; columns: number }): ReactElement {
+  const { item, columns } = props
   const color = item.ok ? theme.success : theme.danger
   const view = item.view
-  const border = view?.card === 'diff' ? theme.success : color
+  const glyph = item.ok ? '✓' : '✗'
+  const indent = '  '
+  const elapsed = formatElapsed(item.elapsedMs)
 
   if (view !== undefined && view.card === 'diff') {
     const lines = renderFileDiffs(view.diffs)
-    const shown = item.verbose ? lines : lines.slice(0, 24)
-    const more = lines.length - shown.length
+    const { shown, hidden } = headTailPreview(lines, item.verbose ? Math.max(1, lines.length) : 8)
     return (
-      <Box flexDirection="column" borderStyle="round" borderColor={border} paddingX={1}>
+      <Box flexDirection="column">
         <Text color={color}>
-          {`${item.ok ? '✓' : '✗'} ${view.title ?? item.title} `}
-          <Text dimColor>{`· ${formatElapsed(item.elapsedMs)}`}</Text>
+          {`${glyph} ${view.title ?? item.title} `}
+          <Text dimColor>{`· ${elapsed}`}</Text>
         </Text>
         {shown.map((line, i) => (
-          <Text key={i}>{line === '' ? ' ' : line}</Text>
+          <Text key={i} dimColor>{`${indent}${line === '' ? ' ' : line}`}</Text>
         ))}
-        {more > 0 && <Text dimColor>{`…（还有 ${more} 行，Ctrl+O 切换完整显示）`}</Text>}
+        {hidden > 0 && <Text dimColor>{`…（还有 ${hidden} 行，Ctrl+O 切换完整显示）`}</Text>}
       </Box>
     )
   }
@@ -316,22 +324,20 @@ function ToolCardView(props: { item: ToolItem; width: number }): ReactElement {
       ? (item.exitCode === 0 ? 'exit 0' : `exit ${item.exitCode}`)
       : item.signal !== undefined ? item.signal : ''
     const output = view.output ?? item.result
-    const lines = output.split('\n')
-    const cap = item.verbose ? 400 : 12
-    const shown = lines.slice(0, cap)
-    const more = lines.length - shown.length
+    const { shown, hidden } = headTailPreview(output.split('\n'), item.verbose ? 400 : 5)
+    // A non-zero exit keeps the green success color but flips the glyph —
+    // the command "ran", the result failed.
+    const exitGlyph = item.ok && item.exitCode !== 1 ? '✓' : '✗'
     return (
-      <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
+      <Box flexDirection="column">
         <Text color={color}>
-          {`${item.ok && item.exitCode !== 1 ? '✓' : '✗'} ${view.title ?? item.title} `}
-          <Text dimColor>
-            {`· ${formatElapsed(item.elapsedMs)}${status !== '' ? ` · ${status}` : ''}`}
-          </Text>
+          {`${exitGlyph} ${view.title ?? item.title} `}
+          <Text dimColor>{`· ${elapsed}${status !== '' ? ` · ${status}` : ''}`}</Text>
         </Text>
         {shown.map((line, i) => (
-          <Text key={i} dimColor>{truncateLine(line, width - 4)}</Text>
+          <Text key={i} dimColor>{`${indent}${truncateLine(line, columns - 2)}`}</Text>
         ))}
-        {more > 0 && <Text dimColor>{`…（还有 ${more} 行，Ctrl+O 切换完整显示）`}</Text>}
+        {hidden > 0 && <Text dimColor>{`…（还有 ${hidden} 行，Ctrl+O 切换完整显示）`}</Text>}
       </Box>
     )
   }
@@ -340,30 +346,27 @@ function ToolCardView(props: { item: ToolItem; width: number }): ReactElement {
     const summary = view.shape === 'matches'
       ? `${view.files.length} 个文件 · ${view.total} 处匹配${view.truncated ? '（已截断）' : ''}`
       : `${view.paths.length} 个路径${view.truncated ? ` / 共 ${view.total}（已截断）` : ''}`
+    const { shown, hidden } = headTailPreview(view.shape === 'paths' ? view.paths : [], item.verbose ? 200 : 3)
     return (
-      <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
+      <Box flexDirection="column">
         <Text color={color}>
-          {`${item.ok ? '✓' : '✗'} ${view.title ?? item.title} `}
-          <Text dimColor>{`· ${summary} · ${formatElapsed(item.elapsedMs)}`}</Text>
+          {`${glyph} ${view.title ?? item.title} `}
+          <Text dimColor>{`· ${summary} · ${elapsed}`}</Text>
         </Text>
-        {(view.shape === 'paths' ? view.paths.slice(0, item.verbose ? 200 : 8) : []).map((path, i) => (
-          <Text key={i} dimColor>{`  ${path}`}</Text>
+        {shown.map((path, i) => (
+          <Text key={i} dimColor>{`${indent}${truncateLine(path, columns - 2)}`}</Text>
         ))}
-        {view.shape === 'paths' && view.paths.length > (item.verbose ? 200 : 8) && (
-          <Text dimColor>{`…（还有 ${view.paths.length - (item.verbose ? 200 : 8)} 个）`}</Text>
-        )}
+        {hidden > 0 && <Text dimColor>{`…（还有 ${hidden} 个）`}</Text>}
       </Box>
     )
   }
 
   if (view !== undefined && view.card === 'read') {
     return (
-      <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
+      <Box flexDirection="column">
         <Text color={color}>
-          {`${item.ok ? '✓' : '✗'} ${view.title ?? `读 ${view.path}`} `}
-          <Text dimColor>
-            {`· 行 ${view.offset}–${view.offset + view.lines.length - 1} / ${view.totalLines} · ${formatElapsed(item.elapsedMs)}`}
-          </Text>
+          {`${glyph} ${view.title ?? `读 ${view.path}`} `}
+          <Text dimColor>{`· 行 ${view.offset}–${view.offset + view.lines.length - 1} / ${view.totalLines} · ${elapsed}`}</Text>
         </Text>
       </Box>
     )
@@ -373,36 +376,38 @@ function ToolCardView(props: { item: ToolItem; width: number }): ReactElement {
     const summary = view.kind === 'search'
       ? `${view.sources.length} 个来源${view.truncated ? '（已截断）' : ''}`
       : `HTTP ${view.statusCode}${view.truncated ? '（内容已截断）' : ''}`
+    const { shown, hidden } = headTailPreview(
+      view.kind === 'search' ? view.sources.map(source => source.title ?? source.url) : [],
+      3,
+    )
     return (
-      <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
+      <Box flexDirection="column">
         <Text color={color}>
-          {`${item.ok ? '✓' : '✗'} ${view.title ?? 'web'} `}
-          <Text dimColor>{`· ${summary} · ${formatElapsed(item.elapsedMs)}`}</Text>
+          {`${glyph} ${view.title ?? 'web'} `}
+          <Text dimColor>{`· ${summary} · ${elapsed}`}</Text>
         </Text>
-        {view.kind === 'search' && view.sources.slice(0, 5).map((source, i) => (
-          <Text key={i} dimColor>{`  ${truncateLine(source.title ?? source.url, width - 6)}`}</Text>
+        {shown.map((title, i) => (
+          <Text key={i} dimColor>{`${indent}${truncateLine(title, columns - 2)}`}</Text>
         ))}
+        {hidden > 0 && <Text dimColor>{`…（还有 ${hidden} 个来源）`}</Text>}
       </Box>
     )
   }
 
-  // Generic / fallback card: title + args preview + result text.
-  const resultLines = item.result.split('\n')
-  const cap = item.verbose ? 400 : 12
-  const shown = resultLines.slice(0, cap)
-  const more = resultLines.length - shown.length
-  const args = formatToolArgs(item.args, Math.max(16, width - 10))
+  // Generic / fallback card: header may embed the args preview.
+  const args = formatToolArgs(item.args, Math.max(16, columns - 10))
+  const { shown, hidden } = headTailPreview(item.result.split('\n'), item.verbose ? 400 : 5)
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1}>
+    <Box flexDirection="column">
       <Text color={color}>
-        {`${item.ok ? '✓' : '✗'} ${item.title} `}
-        {args !== '' && <Text dimColor>{args}</Text>}
-        <Text dimColor>{` · ${formatElapsed(item.elapsedMs)}`}</Text>
+        {`${glyph} ${item.title}`}
+        {args !== '' && <Text dimColor>{` ${args}`}</Text>}
+        <Text dimColor>{` · ${elapsed}`}</Text>
       </Text>
       {shown.map((line, i) => (
-        <Text key={i} dimColor>{truncateLine(line, width - 4)}</Text>
+        <Text key={i} dimColor>{`${indent}${truncateLine(line, columns - 2)}`}</Text>
       ))}
-      {more > 0 && <Text dimColor>{`…（还有 ${more} 行，Ctrl+O 切换完整显示）`}</Text>}
+      {hidden > 0 && <Text dimColor>{`…（还有 ${hidden} 行，Ctrl+O 切换完整显示）`}</Text>}
     </Box>
   )
 }
@@ -436,6 +441,11 @@ function ApprovalView(props: { store: TuiStore; prompt: ApprovalPrompt }): React
   )
 }
 
+/** Interactive option card for agent questions and plan reviews. Arrow keys
+ * are the primary channel (Claude Code / Gemini style); digits 1–9 stay as a
+ * jump-select shortcut addressing positions in the visible window. The card
+ * shows QUESTION_WINDOW options at a time — longer lists scroll instead of
+ * being capped, with ▲/▼ markers (mirrored by the estimator). */
 function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width: number }): ReactElement {
   const { store, question } = props
   const item = question.item
@@ -444,8 +454,22 @@ function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width:
   const approveLabel = isPlanReview ? intent.approve : undefined
   useInput((input, key) => {
     if (key.eventType === 'release') return
+    if (key.upArrow) {
+      store.moveQuestionCursor(-1)
+      return
+    }
+    if (key.downArrow) {
+      store.moveQuestionCursor(1)
+      return
+    }
     if (key.return) {
-      // A plan review confirms the approve option when nothing is selected.
+      // Single-select confirms the highlighted option; the cursor starts on
+      // the plan review's approve option, so bare Enter still approves.
+      // Multi-select confirms whatever the digit keys toggled.
+      if (item.multiSelect !== true) {
+        const option = (item.options ?? [])[question.cursor]
+        if (option !== undefined) store.toggleQuestionOption(option.label)
+      }
       store.confirmQuestion(approveLabel)
       return
     }
@@ -454,10 +478,11 @@ function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width:
       return
     }
     if (/^[1-9]$/.test(input)) {
-      const index = Number(input) - 1
-      const options = item.options ?? []
-      const option = options[index]
-      if (option !== undefined) store.toggleQuestionOption(option.label)
+      const target = question.scroll + Number(input) - 1
+      const option = (item.options ?? [])[target]
+      if (option === undefined) return
+      store.pointQuestionCursor(target)
+      store.toggleQuestionOption(option.label)
     }
   })
   const options = item.options ?? []
@@ -465,6 +490,7 @@ function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width:
     ? renderMarkdownLines(item.detail, Math.max(24, props.width - 4))
     : []
   const shownPlan = planLines.slice(0, 30)
+  const shown = options.slice(question.scroll, question.scroll + QUESTION_WINDOW)
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={isPlanReview ? theme.approval : theme.info} paddingX={1}>
       <Text color={isPlanReview ? theme.approval : theme.info} bold>
@@ -486,20 +512,25 @@ function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width:
       {!isPlanReview && item.detail !== undefined && item.detail !== '' && (
         <Text dimColor>{truncateLine(item.detail, props.width - 4)}</Text>
       )}
-      {options.map((option, index) => {
+      {question.scroll > 0 && <Text dimColor>{`▲（上方还有 ${question.scroll} 项）`}</Text>}
+      {shown.map((option, visibleIndex) => {
         const selected = question.selected.includes(option.label)
         const isApprove = approveLabel !== undefined && option.label === approveLabel
+        const isCursor = question.scroll + visibleIndex === question.cursor
         return (
           <Text
             key={option.label}
             color={isApprove ? theme.success : selected ? theme.info : undefined}
             bold={selected || isApprove}
+            inverse={isCursor}
           >
-            {`[${index + 1}]${selected ? ' ● ' : ' ○ '}${isApprove ? '✓ ' : ''}${option.label}` +
-              (option.description !== undefined ? ` — ${option.description}` : '')}
+            {questionOptionRow(option, visibleIndex, { selected, isApprove, cursor: isCursor })}
           </Text>
         )
       })}
+      {question.scroll + QUESTION_WINDOW < options.length && (
+        <Text dimColor>{`▼（下方还有 ${options.length - question.scroll - QUESTION_WINDOW} 项）`}</Text>
+      )}
       <Text dimColor>
         {questionHintText(isPlanReview, item.multiSelect === true)}
       </Text>

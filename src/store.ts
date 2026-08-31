@@ -75,7 +75,18 @@ export interface ActiveQuestion {
   readonly selected: readonly string[]
   readonly index: number
   readonly total: number
+  /** Highlighted option (arrow-key channel); digits jump-select through the
+   * visible window. Lives here — not in the view — because the estimator
+   * budgets the visible option window and must agree with the render. */
+  readonly cursor: number
+  /** First visible option of the QUESTION_WINDOW sliding window. */
+  readonly scroll: number
 }
+
+/** Options visible at once in a question card; a longer list scrolls through
+ * this window instead of being capped (which used to strand /sessions at the
+ * newest 9 and force /theme into 8-per-page pagination). */
+export const QUESTION_WINDOW = 9
 
 export interface PendingImage {
   readonly ref: ImageAttachmentRef
@@ -159,6 +170,9 @@ export class TuiStore {
   private phaseDetail = ''
   private usage = ''
   private reasoningChars = 0
+  private reasoningHead = ''
+  private reasoningStartMs: number | null = null
+  private reasoningLastMs: number | null = null
   private approval: ApprovalPrompt | null = null
   private approvalResolve: ((choice: ApprovalChoice) => void) | null = null
   private approvalSeq = 0
@@ -270,7 +284,7 @@ export class TuiStore {
       case 'turn/start': {
         this.phase = 'thinking'
         this.phaseDetail = ''
-        this.reasoningChars = 0
+        this.resetReasoning()
         break
       }
       case 'step/start': {
@@ -317,7 +331,10 @@ export class TuiStore {
           this.streamBuf += chunk.text
           this.phase = 'streaming'
         } else if (chunk.type === 'reasoning-delta') {
+          if (this.reasoningStartMs === null) this.reasoningStartMs = ev.time
+          this.reasoningLastMs = ev.time
           this.reasoningChars += chunk.text.length
+          if (this.reasoningHead.length < 200) this.reasoningHead += chunk.text
         }
         return // batched; flushed on the interval tick
       }
@@ -325,6 +342,10 @@ export class TuiStore {
         this.streamBuf = ''
         this.streamText = ''
         const text = blocksToText(ev.data.message.content)
+        // A settled one-line record of this step's reasoning (replays never
+        // saw the deltas, so replayed transcripts simply omit it).
+        const thinking = this.reasoningNotice()
+        if (thinking !== null) this.items.push(thinking)
         // Tool-only rounds carry no text: the message that holds the tool_use
         // blocks would otherwise become a blank transcript item rendering two
         // empty rows between consecutive tool cards. Keep interrupted pushes —
@@ -342,6 +363,7 @@ export class TuiStore {
           this.usage = formatUsage(ev.data.usage, durationMs)
         }
         this.streamStartMs = null
+        this.resetReasoning()
         this.phase = 'thinking'
         this.phaseDetail = ''
         break
@@ -409,7 +431,7 @@ export class TuiStore {
         this.finalizeStream(ev.data.reason.kind === 'aborted')
         this.phase = 'idle'
         this.phaseDetail = ''
-        this.reasoningChars = 0
+        this.resetReasoning()
         this.streamStartMs = null
         if (ev.data.reason.kind === 'aborted' && this.queuedMessages.length > 0) {
           // A user cancel clears queued inbox work; reflect the drop.
@@ -471,6 +493,31 @@ export class TuiStore {
     }
   }
 
+  private resetReasoning(): void {
+    this.reasoningChars = 0
+    this.reasoningHead = ''
+    this.reasoningStartMs = null
+    this.reasoningLastMs = null
+  }
+
+  /** Settled one-line record of the step's reasoning: first line as summary +
+   * live-measured thinking duration. null when the step reasoned nothing. */
+  private reasoningNotice(): NoticeItem | null {
+    if (this.reasoningChars <= 0) return null
+    const firstLine = this.reasoningHead.split('\n').map(line => line.trim()).find(line => line !== '')
+    const summary = firstLine !== undefined
+      ? truncateLine(firstLine, 60)
+      : `${this.reasoningChars} 字`
+    const durationMs = this.reasoningStartMs !== null && this.reasoningLastMs !== null
+      ? Math.max(0, this.reasoningLastMs - this.reasoningStartMs)
+      : 0
+    return {
+      kind: 'notice',
+      tone: 'info',
+      text: `✻ 思考：${summary} · ${formatDuration(durationMs)}`,
+    }
+  }
+
   // -- Local actions -------------------------------------------------------
 
   /** Echo a submitted message: immediately as a transcript item when idle, or
@@ -510,7 +557,7 @@ export class TuiStore {
     this.phase = 'idle'
     this.phaseDetail = ''
     this.usage = ''
-    this.reasoningChars = 0
+    this.resetReasoning()
     this.effortLabel = ''
     this.lastUsage = null
     this.streamStartMs = null
@@ -620,7 +667,27 @@ export class TuiStore {
     this.addNotice(this.verboseToolDetail
       ? '工具详情已切换为完整显示（影响之后完成的卡片）'
       : '工具详情已切换为摘要显示（影响之后完成的卡片）')
+    if (this.verboseToolDetail) this.emitLastToolDetail()
     return this.verboseToolDetail
+  }
+
+  /** Static transcript items never re-render, so the global toggle cannot
+   * restyle already-settled cards; instead, switching to full detail prints
+   * the latest tool call's complete output as a panel — the common want is
+   * the full text of what was just truncated. Bounded by the viewport so the
+   * panel itself never becomes an over-viewport Static item. */
+  private emitLastToolDetail(): void {
+    let i = this.items.length - 1
+    while (i >= 0 && this.items[i]!.kind === 'notice') i--
+    const item = this.items[i]
+    if (item === undefined || item.kind !== 'tool') return
+    const lines = item.result.split('\n')
+    const cap = Math.max(10, (process.stdout.rows ?? 40) - 12)
+    const shown = lines.slice(0, cap)
+    this.addPanel(`工具详情 · ${item.title}`, [
+      ...shown,
+      ...(lines.length > shown.length ? [`…（还有 ${lines.length - shown.length} 行未显示）`] : []),
+    ])
   }
 
   /** Set the approval stance directly（/config 路径）；an optional notice replaces
@@ -758,6 +825,38 @@ export class TuiStore {
     this.commit()
   }
 
+  /** Move the option highlight one step (wraps around); the visible window
+   * slides only when the cursor would leave it. */
+  moveQuestionCursor(delta: 1 | -1): void {
+    const active = this.questionActive
+    if (active === null) return
+    const count = (active.item.options ?? []).length
+    if (count === 0) return
+    const cursor = ((active.cursor + delta) % count + count) % count
+    this.placeQuestionCursor(cursor)
+  }
+
+  /** Point the highlight at an absolute option index (digit keys map to
+   * positions within the visible window; the view resolves that mapping). */
+  pointQuestionCursor(index: number): void {
+    const active = this.questionActive
+    if (active === null) return
+    const count = (active.item.options ?? []).length
+    if (count === 0) return
+    this.placeQuestionCursor(Math.min(Math.max(0, index), count - 1))
+  }
+
+  private placeQuestionCursor(cursor: number): void {
+    const active = this.questionActive
+    if (active === null) return
+    const count = (active.item.options ?? []).length
+    let scroll = Math.min(Math.max(0, active.scroll), Math.max(0, count - QUESTION_WINDOW))
+    if (cursor < scroll) scroll = cursor
+    if (cursor >= scroll + QUESTION_WINDOW) scroll = cursor - QUESTION_WINDOW + 1
+    this.questionActive = { ...active, cursor, scroll }
+    this.commit()
+  }
+
   /** Confirm the option selection for the active question; a default label
    * (plan-review's approve option) applies when nothing is selected. */
   confirmQuestion(defaultLabel?: string): void {
@@ -811,11 +910,18 @@ export class TuiStore {
       resolve?.({ answers: this.questionAnswers })
       return
     }
+    // A plan review starts on its approve option so bare Enter approves —
+    // the same one-press default the digit-era card had.
+    const options = next.options ?? []
+    const approveLabel = next.intent?.kind === 'plan-review' ? next.intent.approve : undefined
+    const approveIndex = approveLabel !== undefined ? options.findIndex(option => option.label === approveLabel) : -1
     this.questionActive = {
       item: next,
       selected: [],
       index: this.questionAnswers.length + 1,
       total: this.questionAnswers.length + 1 + this.questionQueue.length,
+      cursor: approveIndex >= 0 ? approveIndex : 0,
+      scroll: 0,
     }
     this.commit()
   }
@@ -901,6 +1007,14 @@ function formatCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
   return String(n)
+}
+
+/** Same scale as ui/estimate.ts's formatElapsed; kept local because the UI
+ * module imports this one (a reverse import would close a cycle). */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60_000)}m${Math.floor((ms % 60_000) / 1000)}s`
 }
 
 /** Compact one-line preview of raw tool arguments. */
