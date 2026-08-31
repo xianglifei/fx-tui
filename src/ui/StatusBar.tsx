@@ -17,6 +17,23 @@ import { theme } from './theme.js'
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
+/** East-Asian-Ambiguous glyphs this component renders. string-width counts
+ * them as one column, but CJK-configured terminals (iTerm2's "ambiguous
+ * characters are double-width" among them) paint them two — and this line is
+ * packed flush-right, so every unaccounted cell pushed past the edge clips
+ * the tail (the lost final character of `推理 high`). Counting them as two
+ * keeps the degradation ahead of the real render on any terminal. */
+const AMBIGUOUS_GLYPHS = new Set(['●', '·', '↑', '↓', '×'])
+
+/** Terminal cells `text` occupies in the worst case. */
+function displayWidth(text: string): number {
+  let extra = 0
+  for (const ch of text) {
+    if (AMBIGUOUS_GLYPHS.has(ch)) extra++
+  }
+  return stringWidth(text) + extra
+}
+
 export interface StatusBarProps {
   phase: Phase
   detail: string
@@ -60,7 +77,7 @@ export function StatusBar(props: StatusBarProps): ReactElement {
     { text: props.effortLabel !== '' ? `推理 ${props.effortLabel}` : '', priority: 0 },
   ]
   const kept = parts.map(p => p.text)
-  const fits = (): boolean => stringWidth(kept.filter(t => t !== '').join(' · ')) <= width - 10
+  const fits = (): boolean => displayWidth(kept.filter(t => t !== '').join(' · ')) <= width - 10
   while (!fits()) {
     let dropIdx = -1
     let dropPriority = Number.MAX_SAFE_INTEGER
@@ -79,18 +96,22 @@ export function StatusBar(props: StatusBarProps): ReactElement {
     .map((part, index) => ({ ...part, text: kept[index] ?? '' }))
     .filter(part => part.text !== '')
 
+  // The spinner glyph renders before the left text but was never budgeted —
+  // on ambiguous-wide terminals that is one more unaccounted cell at the
+  // right edge. Budget it together with the left side.
+  const spinnerCells = displayWidth(active ? frame : '●')
   let left = ` ${label}`
   if (props.childAgents > 0) left += ` · 🌱×${props.childAgents}`
   const withDetail = props.detail !== '' ? `${left} · ${props.detail}` : left
   const withReasoning = props.phase === 'thinking' && props.reasoningChars > 0
     ? `${withDetail} · 已思考 ${formatCount(props.reasoningChars)} 字`
     : withDetail
-  const budget = Math.max(12, width - stringWidth(visible.map(part => part.text).join(' · ')) - 4)
-  if (stringWidth(withReasoning) <= budget) {
+  const budget = Math.max(12, width - displayWidth(visible.map(part => part.text).join(' · ')) - 4)
+  if (displayWidth(withReasoning) + spinnerCells <= budget) {
     left = withReasoning
-  } else if (stringWidth(withDetail) <= budget) {
+  } else if (displayWidth(withDetail) + spinnerCells <= budget) {
     left = withDetail
-  } else if (stringWidth(left) <= budget) {
+  } else if (displayWidth(left) + spinnerCells <= budget) {
     left = left
   }
   // else: bare label already fits the guaranteed minimum budget.
