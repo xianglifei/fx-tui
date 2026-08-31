@@ -79,6 +79,14 @@ export function App(props: AppProps): ReactElement {
   const columns = stdout?.columns
   const rows = stdout?.rows
   const termColumns = Math.max(24, columns !== undefined && columns > 0 ? columns : 80)
+  // The dynamic region gives up the terminal's LAST column: ink rewrites
+  // changed lines as `content + EL` and a line ending exactly at the final
+  // column leaves the cursor in wrap-pending state, where EL erases from the
+  // cursor INCLUSIVE (verified against Ghostty's Terminal.eraseLine) — the
+  // renderer would eat its own right-edge cell on every repaint (the flush-
+  // right status bar lost the last character of `推理 high`). Static content
+  // is written once without EL and keeps the full width.
+  const liveColumns = termColumns - 1
   const width = Math.max(24, termColumns - 2)
   // The banner spans the terminal's full width — the same width the input box
   // stretches to in the dynamic region — so the top and bottom borders align.
@@ -111,13 +119,13 @@ export function App(props: AppProps): ReactElement {
   const inputHeight = computeInputHeight({
     lines: ed.lines,
     menuOpen: menu !== null && menu.rows.length > 0,
-    trayRows: imageTrayRows(snap.pendingImages, termColumns),
+    trayRows: imageTrayRows(snap.pendingImages, liveColumns),
     // An empty editor can only be un-browsing history (history entries are
     // never empty), so the hint needs no history-cursor knowledge here.
     freeTextHint: snap.questionFreeText && isEmpty,
-    columns: termColumns,
+    columns: liveColumns,
   })
-  const { filler, live } = computeFiller(snap as Snapshot, width, termColumns, rows, inputHeight, rebuildSlack)
+  const { filler, live } = computeFiller(snap as Snapshot, width, termColumns, liveColumns, rows, inputHeight, rebuildSlack)
 
   // Flicker detector (Gemini CLI's useFlickerDetector): a dynamic frame taller
   // than the viewport means some height estimate missed — ink will scroll the
@@ -147,7 +155,7 @@ export function App(props: AppProps): ReactElement {
           />
         )}
       </Static>
-      <Box ref={liveRegionRef} flexDirection="column">
+      <Box ref={liveRegionRef} flexDirection="column" marginRight={1}>
         {filler > 0 && Array.from({ length: filler }, (_, index) => (
           <Text key={`filler-${index}`}>{' '}</Text>
         ))}
@@ -155,7 +163,7 @@ export function App(props: AppProps): ReactElement {
         {snap.pendingTools.length > 1 && (
           // Codex's compact group display: parallel calls collapse to one
           // running line; each settles into its own card on completion.
-          <Text color={theme.warning}>{truncateLine(`⚙ 并行运行 ${snap.pendingTools.length} 个工具…`, termColumns)}</Text>
+          <Text color={theme.warning}>{truncateLine(`⚙ 并行运行 ${snap.pendingTools.length} 个工具…`, liveColumns)}</Text>
         )}
         {snap.streaming !== '' && <StreamView text={snap.streaming} width={width} />}
         {snap.approval !== null && <ApprovalView store={props.store} prompt={snap.approval} />}
@@ -163,7 +171,7 @@ export function App(props: AppProps): ReactElement {
           <QuestionView store={props.store} question={snap.question} width={width} />
         )}
         {snap.question !== null && snap.questionFreeText && (
-          <FreeTextQuestionView question={snap.question} columns={termColumns} />
+          <FreeTextQuestionView question={snap.question} columns={liveColumns} />
         )}
         {snap.todos.length > 0 && <TodoPanel todos={snap.todos} width={width} />}
         {snap.queuedMessages.length > 0 && (
@@ -172,7 +180,7 @@ export function App(props: AppProps): ReactElement {
               <Text key={message.id} color={theme.warning} dimColor>
                 {truncateLine(
                   `${message.mode === 'steer' ? '🧭 已注入（下一步生效）' : '⏳ 已排队（下一轮生效）'}${snap.queuedMessages.length > 1 ? `（${index + 1}/${snap.queuedMessages.length}）` : ''}：${message.text}`,
-                  termColumns,
+                  liveColumns,
                 )}
               </Text>
             ))}
@@ -211,7 +219,7 @@ export function App(props: AppProps): ReactElement {
           onInterrupt={props.actions.onInterrupt}
           onExit={props.actions.onExit}
         />
-        <ModeLine mode={snap.approvalMode} columns={termColumns} />
+        <ModeLine mode={snap.approvalMode} columns={liveColumns} />
         {snap.exitArmed && <Text color={theme.danger}>再按一次 Ctrl+C 退出 fx-tui</Text>}
       </Box>
     </Box>
@@ -603,11 +611,16 @@ function StreamView(props: { text: string; width: number }): ReactElement {
 /**
  * Blank rows that keep the first screen at viewport height:
  * `rows - banner - settled transcript - live region`, clamped at 0.
+ * `columns` widths the STATIC item estimators (they wrap at the full terminal
+ * width); `liveColumns` widths the live-region card estimators — the dynamic
+ * region is one column short (marginRight, never paints the last column), so
+ * their wrap bases must shrink with it or the budget drifts from the render.
  */
 function computeFiller(
   snap: Snapshot,
   width: number,
   columns: number,
+  liveColumns: number,
   rows: number | undefined,
   inputHeight: number,
   slack = 0,
@@ -637,8 +650,8 @@ function computeFiller(
   const live =
     (snap.streaming !== '' ? renderMarkdownLines(snap.streaming, width).length + 1 : 0) + // reply + lead gap
     (snap.pendingTools.length > 0 ? 1 : 0) + // one line, even for parallel calls
-    (snap.approval !== null ? estimateApprovalHeight(snap.approval, columns) : 0) +
-    (snap.question !== null ? estimateQuestionHeight(snap.question, width, columns) : 0) +
+    (snap.approval !== null ? estimateApprovalHeight(snap.approval, liveColumns) : 0) +
+    (snap.question !== null ? estimateQuestionHeight(snap.question, width, liveColumns) : 0) +
     (snap.todos.length > 0 ? 3 + Math.min(8, snap.todos.length) + (snap.todos.length > 8 ? 1 : 0) : 0) +
     (snap.queuedMessages.length > 0 ? Math.min(5, snap.queuedMessages.length) + (snap.queuedMessages.length > 5 ? 1 : 0) : 0) +
     (snap.exitArmed ? 1 : 0) +

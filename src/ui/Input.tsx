@@ -138,7 +138,11 @@ export function InputBox(props: InputBoxProps): ReactElement {
 
   const isEmpty = ed.lines.length === 1 && ed.lines[0] === ''
   const { stdout } = useStdout()
-  const termColumns = Math.max(24, stdout?.columns !== undefined && stdout.columns > 0 ? stdout.columns : 80)
+  // Width of the dynamic region as laid out by App (terminal columns minus
+  // the one-column margin that keeps the live UI off the terminal's last
+  // column) — every truncation base here must match it or a max-width row
+  // would wrap and corrupt the fixed pane budget.
+  const regionColumns = Math.max(24, stdout?.columns !== undefined && stdout.columns > 0 ? stdout.columns : 80) - 1
 
   // Mirror the live editor state into the module-level capture on every render
   // so a resize rebuild can remount with the draft (and cursor) intact.
@@ -709,15 +713,15 @@ export function InputBox(props: InputBoxProps): ReactElement {
             const row = menu.rows[menu.scroll + line]
             if (row === undefined) return <Text key={`blank-${line}`}>{' '}</Text>
             if (row.type === 'header') {
-              return <Text key={`header-${line}`} dimColor>{truncateLine(`— ${row.label} —`, termColumns - 4)}</Text>
+              return <Text key={`header-${line}`} dimColor>{truncateLine(`— ${row.label} —`, regionColumns - 4)}</Text>
             }
             return (
               <Text key={row.label} inverse={menu.scroll + line === menu.index}>
-                <MenuEntryText row={row} expanded={menu.expanded} innerWidth={termColumns - 4} />
+                <MenuEntryText row={row} expanded={menu.expanded} innerWidth={regionColumns - 4} />
               </Text>
             )
           })}
-          <Text dimColor>{truncateLine(menuHint(menu), termColumns - 4)}</Text>
+          <Text dimColor>{truncateLine(menuHint(menu), regionColumns - 4)}</Text>
         </Box>
       )}
       <Box flexDirection="column" borderStyle="round" borderColor={frozen ? theme.muted : theme.accent} paddingX={1}>
