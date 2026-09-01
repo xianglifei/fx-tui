@@ -15,9 +15,13 @@
 import type { ContentBlock, TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionEvent, TodoItem } from '@deepseek-ai/dsh-session'
-import type { AskUserQuestionAnswer, AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
+import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
 import stringWidth from 'string-width'
+import { ApprovalBridge } from './approval-bridge.js'
+import type { ApprovalChoice, ApprovalPrompt, BridgeHooks } from './approval-bridge.js'
+import { QuestionBridge } from './question-bridge.js'
+import type { ActiveQuestion } from './question-bridge.js'
 
 // -- Transcript items ---------------------------------------------------------
 
@@ -61,32 +65,11 @@ export interface PendingTool {
   readonly startedAt: number
 }
 
-export interface ApprovalPrompt {
-  readonly seq: number
-  readonly toolName: string
-  readonly reason: string
-  readonly command?: string
-}
-
-export type ApprovalChoice = 'once' | 'session' | 'always' | 'reject'
-
-export interface ActiveQuestion {
-  readonly item: AskUserQuestionItem
-  readonly selected: readonly string[]
-  readonly index: number
-  readonly total: number
-  /** Highlighted option (arrow-key channel); digits jump-select through the
-   * visible window. Lives here — not in the view — because the estimator
-   * budgets the visible option window and must agree with the render. */
-  readonly cursor: number
-  /** First visible option of the QUESTION_WINDOW sliding window. */
-  readonly scroll: number
-}
-
-/** Options visible at once in a question card; a longer list scrolls through
- * this window instead of being capped (which used to strand /sessions at the
- * newest 9 and force /theme into 8-per-page pagination). */
-export const QUESTION_WINDOW = 9
+// Approval and question waterfalls live in their own bridge modules; the
+// types stay re-exported here — the snapshot and the views consume them.
+export type { ApprovalChoice, ApprovalPrompt } from './approval-bridge.js'
+export type { ActiveQuestion } from './question-bridge.js'
+export { QUESTION_WINDOW } from './question-bridge.js'
 
 export interface PendingImage {
   readonly ref: ImageAttachmentRef
@@ -173,13 +156,8 @@ export class TuiStore {
   private reasoningHead = ''
   private reasoningStartMs: number | null = null
   private reasoningLastMs: number | null = null
-  private approval: ApprovalPrompt | null = null
-  private approvalResolve: ((choice: ApprovalChoice) => void) | null = null
-  private approvalSeq = 0
-  private questionQueue: AskUserQuestionItem[] = []
-  private questionAnswers: AskUserQuestionAnswerItem[] = []
-  private questionActive: ActiveQuestion | null = null
-  private questionResolve: ((answer: AskUserQuestionAnswer) => void) | null = null
+  private readonly approvals: ApprovalBridge
+  private readonly questions: QuestionBridge
   private contextTokens = 0
   private contextWindow: number | undefined
   private pressureWarnedLevel = 0
@@ -207,6 +185,12 @@ export class TuiStore {
     this.sessionId = sessionId
     this.model = model
     this.approvalMode = initialApprovalMode
+    const hooks: BridgeHooks = {
+      commit: () => this.commit(),
+      addNotice: (text, tone) => this.addNotice(text, tone),
+    }
+    this.approvals = new ApprovalBridge(hooks)
+    this.questions = new QuestionBridge(hooks)
     this.rebuild()
   }
 
@@ -223,6 +207,7 @@ export class TuiStore {
   readonly getSnapshot = (): Snapshot => this.snapshot
 
   private rebuild(): void {
+    const question = this.questions.current
     this.snapshot = {
       version: this.snapshot?.version !== undefined ? this.snapshot.version + 1 : 1,
       items: [...this.items],
@@ -237,9 +222,9 @@ export class TuiStore {
       phaseDetail: this.phaseDetail,
       usage: this.usage,
       reasoningChars: this.reasoningChars,
-      approval: this.approval,
-      question: this.questionActive,
-      questionFreeText: this.questionActive !== null && (this.questionActive.item.options ?? []).length === 0,
+      approval: this.approvals.current,
+      question,
+      questionFreeText: question !== null && (question.item.options ?? []).length === 0,
       contextTokens: this.contextTokens,
       contextWindow: this.contextWindow,
       effortLabel: this.effortLabel,
@@ -770,173 +755,51 @@ export class TuiStore {
   // -- Approval bridge -----------------------------------------------------
 
   askApproval(req: { toolName: string; reason: string; command?: string }): Promise<ApprovalChoice> {
-    return new Promise(resolve => {
-      this.approvalSeq += 1
-      this.approval = { seq: this.approvalSeq, toolName: req.toolName, reason: req.reason, command: req.command }
-      this.approvalResolve = resolve
-      this.commit()
-    })
+    return this.approvals.ask(req)
   }
 
   answerApproval(choice: ApprovalChoice): void {
-    if (this.approvalResolve === null) return
-    const resolve = this.approvalResolve
-    const toolName = this.approval?.toolName ?? '(tool)'
-    this.approvalResolve = null
-    this.approval = null
-    const label = choice === 'once' ? '已允许（本次）'
-      : choice === 'session' ? '已允许（本会话内同类调用不再询问）'
-        : choice === 'always' ? '已允许（已写入记忆，之后自动放行）'
-          : '已拒绝'
-    this.items.push({
-      kind: 'notice',
-      tone: choice === 'reject' ? 'warn' : 'info',
-      text: `${label} ${toolName}`,
-    })
-    this.commit()
-    resolve(choice)
+    this.approvals.answer(choice)
   }
 
-  /** Withdraw a pending approval prompt (request aborted upstream). Resolves
-   * fail-closed: leaving the promise pending would hang the awaiting
-   * approval/request waterfall forever. */
+  /** Withdraw a pending approval prompt (request aborted upstream); resolves
+   * fail-closed — see ApprovalBridge.cancel. */
   cancelApproval(): void {
-    if (this.approvalResolve === null) return
-    const resolve = this.approvalResolve
-    const toolName = this.approval?.toolName ?? '(tool)'
-    this.approvalResolve = null
-    this.approval = null
-    this.items.push({
-      kind: 'notice',
-      tone: 'warn',
-      text: `审批请求已撤销，按拒绝处理：${toolName}`,
-    })
-    this.commit()
-    resolve('reject')
+    this.approvals.cancel()
   }
 
   // -- User-questions bridge -------------------------------------------------
 
   askQuestions(items: readonly AskUserQuestionItem[]): Promise<AskUserQuestionAnswer> {
-    return new Promise(resolve => {
-      this.questionQueue = [...items]
-      this.questionAnswers = []
-      this.questionResolve = resolve
-      this.advanceQuestion()
-    })
+    return this.questions.ask(items)
   }
 
   toggleQuestionOption(label: string): void {
-    const active = this.questionActive
-    if (active === null) return
-    const selected = active.item.multiSelect === true
-      ? (active.selected.includes(label)
-          ? active.selected.filter(l => l !== label)
-          : [...active.selected, label])
-      : [label]
-    this.questionActive = { ...active, selected }
-    this.commit()
+    this.questions.toggleOption(label)
   }
 
-  /** Move the option highlight one step (wraps around); the visible window
-   * slides only when the cursor would leave it. */
   moveQuestionCursor(delta: 1 | -1): void {
-    const active = this.questionActive
-    if (active === null) return
-    const count = (active.item.options ?? []).length
-    if (count === 0) return
-    const cursor = ((active.cursor + delta) % count + count) % count
-    this.placeQuestionCursor(cursor)
+    this.questions.moveCursor(delta)
   }
 
-  /** Point the highlight at an absolute option index (digit keys map to
-   * positions within the visible window; the view resolves that mapping). */
   pointQuestionCursor(index: number): void {
-    const active = this.questionActive
-    if (active === null) return
-    const count = (active.item.options ?? []).length
-    if (count === 0) return
-    this.placeQuestionCursor(Math.min(Math.max(0, index), count - 1))
+    this.questions.pointCursor(index)
   }
 
-  private placeQuestionCursor(cursor: number): void {
-    const active = this.questionActive
-    if (active === null) return
-    const count = (active.item.options ?? []).length
-    let scroll = Math.min(Math.max(0, active.scroll), Math.max(0, count - QUESTION_WINDOW))
-    if (cursor < scroll) scroll = cursor
-    if (cursor >= scroll + QUESTION_WINDOW) scroll = cursor - QUESTION_WINDOW + 1
-    this.questionActive = { ...active, cursor, scroll }
-    this.commit()
-  }
-
-  /** Confirm the option selection for the active question; a default label
-   * (plan-review's approve option) applies when nothing is selected. */
   confirmQuestion(defaultLabel?: string): void {
-    const active = this.questionActive
-    if (active === null) return
-    const selected = active.selected.length > 0
-      ? [...active.selected]
-      : defaultLabel !== undefined ? [defaultLabel] : []
-    if (selected.length === 0) return
-    this.questionAnswers.push({ id: active.item.id, selected })
-    this.advanceQuestion()
+    this.questions.confirm(defaultLabel)
   }
 
-  /** Free-text answer for the active question (typed in the main input box). */
   submitFreeTextAnswer(text: string): void {
-    const active = this.questionActive
-    if (active === null) return
-    const trimmed = text.trim()
-    if (trimmed === '') return
-    this.questionAnswers.push({ id: active.item.id, selected: [], custom: trimmed })
-    this.advanceQuestion()
+    this.questions.submitFreeText(text)
   }
 
-  /** Skip the active question with no selection. */
   skipQuestion(): void {
-    const active = this.questionActive
-    if (active === null) return
-    this.questionAnswers.push({ id: active.item.id, selected: [] })
-    this.advanceQuestion()
+    this.questions.skip()
   }
 
-  /** Withdraw the whole pending questionnaire (request aborted upstream). */
   cancelQuestions(): void {
-    if (this.questionResolve === null) return
-    const resolve = this.questionResolve
-    this.questionResolve = null
-    this.questionActive = null
-    this.questionQueue = []
-    this.questionAnswers = []
-    this.commit()
-    resolve({ answers: [] })
-  }
-
-  private advanceQuestion(): void {
-    const next = this.questionQueue.shift()
-    if (next === undefined) {
-      const resolve = this.questionResolve
-      this.questionResolve = null
-      this.questionActive = null
-      this.commit()
-      resolve?.({ answers: this.questionAnswers })
-      return
-    }
-    // A plan review starts on its approve option so bare Enter approves —
-    // the same one-press default the digit-era card had.
-    const options = next.options ?? []
-    const approveLabel = next.intent?.kind === 'plan-review' ? next.intent.approve : undefined
-    const approveIndex = approveLabel !== undefined ? options.findIndex(option => option.label === approveLabel) : -1
-    this.questionActive = {
-      item: next,
-      selected: [],
-      index: this.questionAnswers.length + 1,
-      total: this.questionAnswers.length + 1 + this.questionQueue.length,
-      cursor: approveIndex >= 0 ? approveIndex : 0,
-      scroll: 0,
-    }
-    this.commit()
+    this.questions.cancel()
   }
 }
 

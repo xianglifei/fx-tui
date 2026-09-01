@@ -3,6 +3,24 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.21.1] - 2026-09-01
+
+### 重构：审批桥与问答瀑布从 store.ts 抽出 — reducer 与 React 管线解耦
+
+- **拆分**：`src/approval-bridge.ts`（`ApprovalBridge`：单槽审批提示、
+  fail-closed 撤销、`ApprovalPrompt`/`ApprovalChoice` 类型）与
+  `src/question-bridge.ts`（`QuestionBridge`：问答队列、滑动窗口光标模型、
+  plan-review 默认项、`ActiveQuestion`/`QUESTION_WINDOW`）。两桥经共享的
+  `BridgeHooks`（commit + addNotice）回写 store，`TuiStore` 持有实例并保留
+  原方法名转发——调用方（index.ts、App.tsx、estimate.ts）零改动
+- **行为不变**：提示/通知时序、快照字段、光标滑窗数学逐行保留；类型经
+  store 再导出，视图层导入路径不变
+- **测试**：新增 `approval-bridge.test.ts` / `question-bridge.test.ts` 共
+  9 个用例，锁住 fail-closed 撤销、队列行走、滑窗数学、free-text 自定义
+  回答与取消语义；并如实记录「第二次 ask 顶掉前一个 promise」的既有语义
+  （单 agent 审批瀑布不并发，实际不可达）
+- **影响面**：store.ts 1062 → 928 行，两个桥各自独立可测；运行时依赖零新增
+
 ## [0.21.0] - 2026-09-01
 
 ### 重构：斜杠命令层拆分到 src/commands/ — index.ts 从 1708 行降到 806 行
