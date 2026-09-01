@@ -29,5 +29,5 @@
 
 ## 注意事项（非规则，但是事实）
 
-- `package.json` 的 `version` 字段（0.1.0）与 `FX_TUI_VERSION` 长期脱节，
-  当前以 `FX_TUI_VERSION` 为准；将来启用 npm 分发前必须先对齐二者。
+- `package.json` 的 `version` 与 `FX_TUI_VERSION` 自 0.21.3 起已对齐，
+  之后二者随每次发版同步变更。

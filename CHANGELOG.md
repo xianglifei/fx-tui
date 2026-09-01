@@ -3,6 +3,19 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.21.3] - 2026-09-01
+
+### 维护：仓库卫生与版本口径对齐
+
+- **.gitignore 补全**：`.zcode/`、`.workbuddy/`、`review-report.*` 入册——
+  AGENTS.md 明令禁止提交这些工作区工具产物，此前只靠提交时人工避开；
+  未跟踪的两篇文档（`docs/dsh-0.1.2-alpha-upgrade-notes.md` 上游 alpha
+  升级断点与迁移步骤、`docs/manual-test-v0.17.0.md` 手工测试记录）正式
+  归档入库，不再悬空
+- **版本对齐**：`package.json` 的 `version` 从长期脱节的 `0.1.0` 对齐到
+  `FX_TUI_VERSION`，此后二者随每次发版同步变更（AGENTS.md 注意事项同步
+  更新）；npm 分发未启用，本次对齐不构成发布
+
 ## [0.21.2] - 2026-09-01
 
 ### 重构：三处逐字重复的展示工具函数合并到 src/text.ts — 解开 store ↔ ui 绕行
