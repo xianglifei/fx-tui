@@ -3,6 +3,18 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.21.5] - 2026-09-01
+
+### 维护：GitHub Actions CI — typecheck / test / build 三道闸自动化
+
+- **动机**：AGENTS.md 要求「提交前 `pnpm typecheck && pnpm run build` 通过」，
+  此前只有人肉纪律执行；测试基线（0.20.3）落地后 `pnpm test` 也加入了这道闸
+- **配置**：`.github/workflows/ci.yml` —— push 到 main 与全部 PR 触发；
+  ubuntu + Node 22 + pnpm 11，依次跑 `pnpm install --frozen-lockfile`、
+  `pnpm typecheck`、`pnpm test`、`pnpm run build`；pnpm 层开启缓存
+- **影响面**：本地工作流不变（tests 均为平台无关的纯函数）；首次远端运行
+  顺带验证 TS 7.0.2（native）在 linux CI 环境的可用性
+
 ## [0.21.4] - 2026-09-01
 
 ### 修复：四处小型加固 — /btw 守卫、悬空瀑布 fail-closed、通知转义、锁释放校验
