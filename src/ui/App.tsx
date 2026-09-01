@@ -125,7 +125,11 @@ export function App(props: AppProps): ReactElement {
     freeTextHint: snap.questionFreeText && isEmpty,
     columns: liveColumns,
   })
-  const { filler, live } = computeFiller(snap as Snapshot, width, termColumns, liveColumns, rows, inputHeight, rebuildSlack)
+  // One markdown pass per frame, shared by the filler budget below and
+  // StreamView: computing it twice doubled the streaming cost of every
+  // 60ms token flush on long replies.
+  const streamingLines = snap.streaming !== '' ? renderMarkdownLines(snap.streaming, width) : []
+  const { filler, live } = computeFiller(snap as Snapshot, width, termColumns, liveColumns, rows, inputHeight, streamingLines, rebuildSlack)
 
   // Flicker detector (Gemini CLI's useFlickerDetector): a dynamic frame taller
   // than the viewport means some height estimate missed — ink will scroll the
@@ -165,7 +169,7 @@ export function App(props: AppProps): ReactElement {
           // running line; each settles into its own card on completion.
           <Text color={theme.warning}>{truncateLine(`⚙ 并行运行 ${snap.pendingTools.length} 个工具…`, liveColumns)}</Text>
         )}
-        {snap.streaming !== '' && <StreamView text={snap.streaming} width={width} />}
+        {snap.streaming !== '' && <StreamView lines={streamingLines} />}
         {snap.approval !== null && <ApprovalView store={props.store} prompt={snap.approval} />}
         {snap.question !== null && !snap.questionFreeText && (
           <QuestionView store={props.store} question={snap.question} width={width} />
@@ -589,12 +593,11 @@ function ModeLine(props: { mode: ApprovalMode; columns: number }): ReactElement 
     : <Text dimColor>{truncateLine('权限模式：每次询问（shift+tab 切换自动允许）', props.columns)}</Text>
 }
 
-function StreamView(props: { text: string; width: number }): ReactElement {
-  const lines = renderMarkdownLines(props.text, props.width)
+function StreamView(props: { lines: readonly string[] }): ReactElement {
   return (
     <Box flexDirection="column">
       <LeadGap />
-      {lines.map((line, i) => (
+      {props.lines.map((line, i) => (
         <Text key={i}>{line === '' ? ' ' : line}</Text>
       ))}
     </Box>
@@ -623,6 +626,7 @@ function computeFiller(
   liveColumns: number,
   rows: number | undefined,
   inputHeight: number,
+  streamingLines: readonly string[],
   slack = 0,
 ): { filler: number; live: number } {
   if (rows === undefined || rows <= 0 || rows >= 1000) return { filler: 0, live: 0 }
@@ -648,7 +652,7 @@ function computeFiller(
   }
 
   const live =
-    (snap.streaming !== '' ? renderMarkdownLines(snap.streaming, width).length + 1 : 0) + // reply + lead gap
+    (streamingLines.length > 0 ? streamingLines.length + 1 : 0) + // reply + lead gap
     (snap.pendingTools.length > 0 ? 1 : 0) + // one line, even for parallel calls
     (snap.approval !== null ? estimateApprovalHeight(snap.approval, liveColumns) : 0) +
     (snap.question !== null ? estimateQuestionHeight(snap.question, width, liveColumns) : 0) +

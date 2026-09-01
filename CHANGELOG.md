@@ -3,6 +3,19 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.20.6] - 2026-09-01
+
+### 性能：流式回复的 markdown 每帧只渲染一次 — 填充预算与视图共用一遍结果
+
+- **动机**：每个 60ms 的 token flush 帧里，`computeFiller`（为填充预算算行数）
+  与 `StreamView`（真正绘制）各自对同一个 `snap.streaming` 完整跑一遍
+  markdown 渲染 + 语法高亮——长回复时这份开销直接翻倍
+- **修复**：`App` 渲染体里算一次 `streamingLines`，同时喂给 `computeFiller`
+  （取 `.length`，签名新增该参数）与 `StreamView`（props 从 `text` 改为
+  `lines`）。渲染结果与之前逐字节一致，只是算了一遍而不是两遍
+- **影响面**：无行为变化；「估算==渲染」对齐不受影响——两处消费的是同一份
+  行数组，漂移在结构上不可能发生
+
 ## [0.20.5] - 2026-09-01
 
 ### 性能：@-文件补全的目录遍历改为进目录前剪枝 — node_modules 不再被物化

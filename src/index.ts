@@ -69,7 +69,7 @@ import type { GhosttyThemeId } from './ui/ghostty-themes.js'
 import { installedRoot, performSelfUpdate } from './update.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.20.5'
+export const FX_TUI_VERSION = '0.20.6'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
