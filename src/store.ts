@@ -464,7 +464,10 @@ export class TuiStore {
       default:
         break
     }
-    this.commit()
+    // Replay folds thousands of events with no listener attached (or worse,
+    // with React attached during a session switch): skip the O(N²) snapshot
+    // rebuilds and let finishReplay commit exactly once at the end.
+    if (!this.replaying) this.commit()
   }
 
   /** Fold the whole persisted log of a resumed session (no streaming). */

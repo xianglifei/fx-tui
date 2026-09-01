@@ -3,6 +3,26 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.20.4] - 2026-08-31
+
+### 性能：会话重放批量提交 — 长会话恢复/切换从 O(N²) 快照重建到单次提交
+
+- **动机**：`replay()` 逐事件走 `onEvent`，而 `onEvent` 末尾无条件 `commit()`——
+  每次提交都复制整个条目数组（`[...items]`），恢复 N 个事件就是 O(N²) 拷贝。
+  启动重放时尚无订阅者只是白算；`/sessions` 切换会话时 React 已订阅，几千事件
+  的会话会连续触发数千次快照重建
+- **修复**：`onEvent` 在重放期间跳过 `commit()`，由 `finishReplay()` 统一在
+  重放结束时提交一次。两条调用路径（启动 `index.ts:235-236`、会话切换
+  `reset()` 内部）本就以 `finishReplay()` 收尾，行为不变
+- **影响面**：重放期间不再产生中间快照（重放本就不该有过渡帧）；活跃事件流
+  逐事件提交的节奏不变。新增 `store.test.ts` 用订阅计数锁住三个约定：
+  重放 0 次提交、`finishReplay` 恰好 1 次、重放后活跃事件立即提交
+- **顺手修复**：`tsconfig.test.json` 配置内声明的 `noEmit` 会被
+  typescript 7.0.2（native）忽略——`pnpm typecheck` 第二段 tsc 因此把整个
+  `lib/` 连同编译后的 `*.test.js/.d.ts` 全量重发，vitest 双份跑测试、npm
+  `files` 产物被污染。typecheck 脚本对两段 tsc 都显式传 CLI `--noEmit`
+  （实测旗标有效、配置无效），已清理 lib 残留
+
 ## [0.20.3] - 2026-08-31
 
 ### 测试基线：vitest 落地，纯函数回归用例锁死估算与解析层
