@@ -13,6 +13,7 @@ import type { ReactElement } from 'react'
 import { Box, Text, useStdout } from 'ink'
 import stringWidth from 'string-width'
 import type { Phase } from '../store.js'
+import { formatCount } from '../text.js'
 import { theme } from './theme.js'
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -128,12 +129,6 @@ export function StatusBar(props: StatusBarProps): ReactElement {
       ))}
     </Box>
   )
-}
-
-function formatCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(n)
 }
 
 /** Context water-level text like `上下文 45% (58k/128k)`; empty before any measurement. */

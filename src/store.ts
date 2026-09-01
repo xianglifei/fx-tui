@@ -17,11 +17,11 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionEvent, TodoItem } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
-import stringWidth from 'string-width'
 import { ApprovalBridge } from './approval-bridge.js'
 import type { ApprovalChoice, ApprovalPrompt, BridgeHooks } from './approval-bridge.js'
 import { QuestionBridge } from './question-bridge.js'
 import type { ActiveQuestion } from './question-bridge.js'
+import { formatCount, formatElapsed, truncateLine } from './text.js'
 
 // -- Transcript items ---------------------------------------------------------
 
@@ -511,7 +511,7 @@ export class TuiStore {
     return {
       kind: 'notice',
       tone: 'info',
-      text: `✻ 思考：${summary} · ${formatDuration(durationMs)}`,
+      text: `✻ 思考：${summary} · ${formatElapsed(durationMs)}`,
     }
   }
 
@@ -879,20 +879,6 @@ function formatUsage(usage: TokenUsage, durationMs: number | null): string {
   return text
 }
 
-function formatCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(n)
-}
-
-/** Same scale as ui/estimate.ts's formatElapsed; kept local because the UI
- * module imports this one (a reverse import would close a cycle). */
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
-  return `${Math.floor(ms / 60_000)}m${Math.floor((ms % 60_000) / 1000)}s`
-}
-
 /** Compact one-line preview of raw tool arguments. */
 export function formatToolArgs(args: string, limit: number): string {
   if (args === '') return ''
@@ -911,18 +897,4 @@ export function formatToolArgs(args: string, limit: number): string {
     // raw JSON string as produced by the model — keep as-is
   }
   return truncateLine(preview, limit)
-}
-
-function truncateLine(line: string, width: number): string {
-  if (line === '') return ''
-  if (stringWidth(line) <= width) return line
-  let out = ''
-  let w = 0
-  for (const ch of Array.from(line)) {
-    const cw = stringWidth(ch)
-    if (w + cw > width) return `${out}…`
-    out += ch
-    w += cw
-  }
-  return out
 }

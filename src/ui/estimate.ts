@@ -14,10 +14,15 @@ import stringWidth from 'string-width'
 import wrapAnsi from 'wrap-ansi'
 import type { ActiveQuestion, ApprovalPrompt, FinalItem, ToolItem } from '../store.js'
 import { formatToolArgs, QUESTION_WINDOW } from '../store.js'
+import { formatElapsed } from '../text.js'
 import { renderFileDiffs } from '../diff.js'
 import { renderMarkdownLines } from '../markdown.js'
 import { BANNER_BOX_HEIGHT } from './Banner.js'
 import { textRows } from './ink-text.js'
+
+// Shared display-width helpers live in ../text.ts; re-exported here so the
+// view-layer import paths stay unchanged.
+export { formatElapsed, truncateLine } from '../text.js'
 
 /** Prompt glyph prefixing every user-message row. */
 export const USER_PROMPT = '❯ '
@@ -208,24 +213,4 @@ export function estimateApprovalHeight(prompt: ApprovalPrompt, columns: number):
   if (prompt.command !== undefined && prompt.command !== '') h += textRows(`  ${prompt.command}`, inner)
   if (prompt.reason !== '') h += textRows(prompt.reason, inner)
   return h + textRows(APPROVAL_CHOICES_TEXT, inner)
-}
-
-export function formatElapsed(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
-  return `${Math.floor(ms / 60_000)}m${Math.floor((ms % 60_000) / 1000)}s`
-}
-
-export function truncateLine(line: string, width: number): string {
-  if (line === '') return ''
-  if (stringWidth(line) <= width) return line
-  let out = ''
-  let w = 0
-  for (const ch of Array.from(line)) {
-    const cw = stringWidth(ch)
-    if (w + cw > width) return `${out}…`
-    out += ch
-    w += cw
-  }
-  return out
 }

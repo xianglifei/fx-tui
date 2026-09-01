@@ -3,6 +3,19 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.21.2] - 2026-09-01
+
+### 重构：三处逐字重复的展示工具函数合并到 src/text.ts — 解开 store ↔ ui 绕行
+
+- **合并**：`truncateLine`（store.ts 与 estimate.ts 各一份）、`formatDuration`
+  （store.ts）≡ `formatElapsed`（estimate.ts）、`formatCount`（store.ts 与
+  StatusBar.tsx 各一份）——三对实现逐字相同，统一为 `src/text.ts` 的
+  `truncateLine` / `formatElapsed` / `formatCount`
+- **分层**：text.ts 位于 store 与 ui 之下（它不依赖任何人，两边都可导入），
+  store.ts 里「反向导入会成环所以保留私有副本」的注释所指的结正式解开；
+  estimate.ts 原地再导出两个名字，视图层导入路径零改动
+- **影响面**：纯去重，无行为变化；66 个测试与 typecheck/build 全绿
+
 ## [0.21.1] - 2026-09-01
 
 ### 重构：审批桥与问答瀑布从 store.ts 抽出 — reducer 与 React 管线解耦
