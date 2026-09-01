@@ -1,6 +1,6 @@
 {
   "name": "fx-tui",
-  "version": "0.21.3",
+  "version": "0.21.4",
   "description": "Interactive terminal surface for DeepSeek Harness (dsh) — an out-of-tree TUI bundle powered by Ink.",
   "type": "module",
   "main": "lib/index.js",

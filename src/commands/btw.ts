@@ -9,11 +9,17 @@ let btwController: AbortController | null = null
 
 /** `/btw <question>`: one no-tools model call over the current conversation
  * surface. It never touches the session log (no history, no token meter),
- * never interrupts the main turn, and supersedes any in-flight side ask. */
+ * never interrupts the main turn, and supersedes any in-flight side ask.
+ * Guarded to idle turns only: deriveMessages() mid-turn would snapshot a
+ * half-streamed message surface. */
 export async function runBtw(c: CommandCtx, question: string): Promise<void> {
   const trimmed = question.trim()
   if (trimmed === '') {
     c.store.addNotice('用法：/btw <问题>（复用当前上下文的单轮侧问，不打断主任务、不写入会话）', 'warn')
+    return
+  }
+  if (c.store.getSnapshot().phase !== 'idle') {
+    c.store.addNotice('侧问需要在回合结束时使用（运行中的回合消息面还不完整）', 'warn')
     return
   }
   if (btwController !== null) btwController.abort()

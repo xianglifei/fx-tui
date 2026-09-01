@@ -132,6 +132,11 @@ function acquireLock(path: string, now: () => number): boolean {
 
 function releaseLock(path: string): void {
   try {
+    // Only unlink a lock we own: if we stole a "stale" lock from a holder
+    // that was merely hung and it later releases, deleting it would open a
+    // window for a third instance to acquire mid-run.
+    const owner = Number.parseInt(readFileSync(path, 'utf8').trim(), 10)
+    if (owner !== process.pid) return
     unlinkSync(path)
   } catch { /* nothing to clean up */ }
 }

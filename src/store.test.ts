@@ -54,4 +54,24 @@ describe('TuiStore replay batching', () => {
 
     unsubscribe()
   })
+
+  it('reset() fail-closes a pending approval and question waterfall', async () => {
+    const store = new TuiStore('s1', 'model')
+    const approval = store.askApproval({ toolName: 'bash', reason: '' })
+    const question = store.askQuestions([{ id: 'q', question: 'Q', options: [{ label: 'x' }] }])
+
+    store.reset('s2', 'model', [])
+
+    expect(await approval).toBe('reject')
+    expect(await question).toEqual({ answers: [] })
+  })
+
+  it('dispose() fail-closes a pending approval waterfall', async () => {
+    const store = new TuiStore('s1', 'model')
+    const approval = store.askApproval({ toolName: 'bash', reason: '' })
+
+    store.dispose()
+
+    expect(await approval).toBe('reject')
+  })
 })

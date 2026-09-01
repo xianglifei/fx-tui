@@ -32,7 +32,11 @@ export function notifyTurnComplete(mode: NotifyMode, ok: boolean, elapsedMs: num
   const seconds = Math.round(elapsedMs / 1000)
   const body = ok ? `任务完成（耗时 ${seconds} 秒），回到 fx-tui 查看` : `任务出错（耗时 ${seconds} 秒），回到 fx-tui 处理`
   try {
-    spawnDetached('osascript', ['-e', `display notification "${body}" with title "fx-tui" sound name "default"`])
+    // Escape for the AppleScript string literal: the body is built from
+    // fixed text and numbers today, but a model-supplied fragment would
+    // otherwise break out of the quotes.
+    const escaped = body.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    spawnDetached('osascript', ['-e', `display notification "${escaped}" with title "fx-tui" sound name "default"`])
   } catch {
     // notifications are best-effort
   }

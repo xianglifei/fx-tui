@@ -68,4 +68,14 @@ export class ApprovalBridge {
     this.hooks.addNotice(`审批请求已撤销，按拒绝处理：${toolName}`, 'warn')
     resolve('reject')
   }
+
+  /** Fail-closed cleanup without a user-facing notice — for store reset and
+   * dispose, where the transcript carrying the notice is discarded anyway. */
+  cancelQuiet(): void {
+    if (this.resolve === null) return
+    const resolve = this.resolve
+    this.resolve = null
+    this.prompt = null
+    resolve('reject')
+  }
 }

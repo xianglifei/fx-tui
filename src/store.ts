@@ -253,6 +253,9 @@ export class TuiStore {
     if (this.exitTimer !== null) clearTimeout(this.exitTimer)
     this.flushTimer = null
     this.exitTimer = null
+    // Fail-closed: a waterfall still pending at teardown must not dangle.
+    this.approvals.cancelQuiet()
+    this.questions.cancelQuiet()
   }
 
   private flushStream(): void {
@@ -535,6 +538,11 @@ export class TuiStore {
 
   /** Reset for a live switch to another persisted session. */
   reset(sessionId: string, model: string, events: readonly SessionEvent[]): void {
+    // Defensive fail-closed: a waterfall still pending across a session switch
+    // must not dangle (the upstream abort path normally clears it first; the
+    // quiet variant skips the notice — the old transcript is discarded here).
+    this.approvals.cancelQuiet()
+    this.questions.cancelQuiet()
     this.sessionId = sessionId
     this.model = model
     this.items = []

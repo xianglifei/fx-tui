@@ -123,6 +123,18 @@ export class QuestionBridge {
     resolve({ answers: [] })
   }
 
+  /** Fail-closed cleanup without a notice or commit — for store reset and
+   * dispose, where the transcript is discarded and a commit follows anyway. */
+  cancelQuiet(): void {
+    if (this.resolve === null) return
+    const resolve = this.resolve
+    this.resolve = null
+    this.active = null
+    this.queue = []
+    this.answers = []
+    resolve({ answers: [] })
+  }
+
   private advance(): void {
     const next = this.queue.shift()
     if (next === undefined) {
