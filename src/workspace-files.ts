@@ -7,7 +7,7 @@
  */
 
 import { readdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 
 const IGNORED_SEGMENTS = new Set([
   '.git', 'node_modules', 'dist', 'build', 'out', 'target', 'vendor',
@@ -41,26 +41,37 @@ export function invalidateWorkspaceFiles(): void {
   cache = null
 }
 
+/**
+ * Hand-rolled DFS instead of `readdir({ recursive: true })`: the built-in
+ * recursive read materializes EVERY entry of the tree (node_modules among
+ * them, often hundreds of thousands of Dirents) before any filtering can
+ * run. Here an ignored directory is pruned the moment its entry is seen —
+ * it is never entered, so its contents never exist in memory at all.
+ * Directory symlinks are not followed (no cycles).
+ */
 async function walk(root: string): Promise<string[]> {
   const files: string[] = []
-  let entries
-  try {
-    entries = await readdir(root, { recursive: true, withFileTypes: true })
-  } catch {
-    return files
-  }
-  for (const entry of entries) {
-    if (files.length >= MAX_FILES) break
-    if (!entry.isFile()) continue
-    if (entry.name.startsWith('.DS_Store')) continue
-    const parent = (entry as { parentPath?: string }).parentPath ?? ''
-    const joined = parent === '' ? entry.name : join(parent, entry.name)
-    // readdir with an absolute root yields absolute parent paths; strip back to relative.
-    const prefix = root.endsWith('/') ? root : `${root}/`
-    const relative = joined.startsWith(prefix) ? joined.slice(prefix.length) : joined
-    if (relative.split('/').some(segment => IGNORED_SEGMENTS.has(segment))) continue
-    if (IGNORED_PREFIXES.some(prefixName => entry.name.startsWith(prefixName))) continue
-    files.push(relative)
+  const queue: string[] = [root]
+  while (queue.length > 0 && files.length < MAX_FILES) {
+    const dir = queue.pop()!
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      continue // unreadable directory: skip, like the recursive walk did
+    }
+    for (const entry of entries) {
+      if (files.length >= MAX_FILES) break
+      if (IGNORED_PREFIXES.some(prefix => entry.name.startsWith(prefix))) continue
+      // Uniform name check: prunes ignored directories before descending and
+      // skips files named like one (a file literally called `build`).
+      if (IGNORED_SEGMENTS.has(entry.name)) continue
+      if (entry.isDirectory()) {
+        queue.push(join(dir, entry.name))
+      } else if (entry.isFile()) {
+        files.push(relative(root, join(dir, entry.name)))
+      }
+    }
   }
   files.sort((a, b) => a.length - b.length || a.localeCompare(b))
   return files

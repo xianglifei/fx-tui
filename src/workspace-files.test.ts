@@ -1,5 +1,8 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { fuzzyMatchPaths, scorePath } from './workspace-files.js'
+import { fuzzyMatchPaths, invalidateWorkspaceFiles, listWorkspaceFiles, scorePath } from './workspace-files.js'
 
 describe('scorePath', () => {
   it('returns null when the query is not a subsequence', () => {
@@ -30,5 +33,36 @@ describe('fuzzyMatchPaths', () => {
 
   it('empty query returns candidates in order', () => {
     expect(fuzzyMatchPaths('', ['b', 'a'], 10).map(m => m.path)).toEqual(['b', 'a'])
+  })
+})
+
+describe('listWorkspaceFiles', () => {
+  it('prunes ignored directories before descending', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fx-walk-'))
+    try {
+      mkdirSync(join(dir, 'node_modules', 'pkg'), { recursive: true })
+      writeFileSync(join(dir, 'node_modules', 'pkg', 'index.js'), '')
+      mkdirSync(join(dir, '.git', 'objects'), { recursive: true })
+      writeFileSync(join(dir, '.git', 'objects', 'ab'), '')
+      mkdirSync(join(dir, 'dist'), { recursive: true })
+      writeFileSync(join(dir, 'dist', 'out.js'), '')
+      mkdirSync(join(dir, 'src'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'app.ts'), '')
+      writeFileSync(join(dir, 'build'), '') // a FILE named like an ignored segment
+      writeFileSync(join(dir, 'package.json'), '')
+
+      invalidateWorkspaceFiles()
+      const files = await listWorkspaceFiles(dir)
+
+      expect(files).toContain('src/app.ts')
+      expect(files).toContain('package.json')
+      expect(files.some(f => f.includes('node_modules'))).toBe(false)
+      expect(files.some(f => f.includes('.git'))).toBe(false)
+      expect(files.some(f => f.startsWith('dist'))).toBe(false)
+      expect(files).not.toContain('build')
+    } finally {
+      invalidateWorkspaceFiles()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
