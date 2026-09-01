@@ -164,8 +164,8 @@ const DARK: Palette = {
 
 // -- Color math over #rrggbb ---------------------------------------------------
 
-/** sRGB relative luminance (0–1) as used by WCAG contrast. */
-function hexLuminance(hex: string): number {
+/** sRGB relative luminance (0–1) as used by WCAG contrast. Exported for tests. */
+export function hexLuminance(hex: string): number {
   return (
     0.2126 * linearChannel(hex, 1) +
     0.7152 * linearChannel(hex, 3) +
@@ -179,7 +179,7 @@ function linearChannel(hex: string, at: number): number {
   return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
 }
 
-function contrastRatio(a: string, b: string): number {
+export function contrastRatio(a: string, b: string): number {
   const la = hexLuminance(a)
   const lb = hexLuminance(b)
   return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)

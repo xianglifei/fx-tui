@@ -3,6 +3,34 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.20.3] - 2026-08-31
+
+### 测试基线：vitest 落地，纯函数回归用例锁死估算与解析层
+
+- **动机**：仓库此前零自动化测试（无测试框架、无 CI），v0.18.0→v0.20.2 连续五个
+  版本修复的都是同一族 bug——估算行数与实际渲染漂移导致的输入框跳位/吞行。本版
+  先把纯函数层守起来；「估算==实际渲染」的渲染级断言作为后续 stretch goal
+- **测试框架**：引入 `vitest` 作 devDependency（不进运行时依赖，遵守运行时依赖
+  克制约定）。`pnpm test` 运行；`pnpm typecheck` 扩展为双 tsconfig——
+  `tsconfig.json` 排除 `*.test.ts` 保持构建产物干净，新增 `tsconfig.test.json`
+  让类型检查覆盖测试文件
+- **用例范围**（6 个文件）：
+  - `ui/estimate.ts`：`estimateItemHeight` 六类条目黄金值、审批/问题卡高度、
+    `headTailPreview` 首尾截断、`truncateLine` CJK 宽度、`questionOptionRow` 标记
+  - `path-drops.ts`：`tokenizePathList`（引号/转义/file:// URI/未闭合引号）、
+    `expandPath`、`imageMediaTypeOf`、`parsePathChunk` 判定
+  - `workspace-files.ts`：`scorePath` 前缀优于包含、子序列匹配、`fuzzyMatchPaths`
+    排序与 limit
+  - `ui/theme.ts`：`resolveTheme`/`isThemeSetting`、`hexLuminance`/`contrastRatio`
+    色彩数学不变量
+  - `approval-memory.ts`：`ApprovalMemory.key` 的语义键规则
+  - `markdown.ts`：`fitWidths` 收缩数学（最宽优先/下限/塌缩）+ `renderMarkdownLines`
+    空行折叠/列表/代码块/表格冒烟
+- **配套 export**：`hexLuminance`、`contrastRatio`（`ui/theme.ts`）、`scorePath`
+  （`workspace-files.ts`）、`fitWidths`（`markdown.ts`）由模块私有改为导出，
+  纯增量无行为变化
+- **影响面**：无任何运行时行为变化
+
 ## [0.20.2] - 2026-08-31
 
 ### 修复：状态栏尾字符被裁的真因 — ink 逐行重写的 EL 会擦掉贴边最后一格（0.20.1 诊断修正）

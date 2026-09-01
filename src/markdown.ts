@@ -164,7 +164,8 @@ function cellText(cell: Tokens.TableCell): string {
  * go as low as 1 (cells collapse to '…'). */
 const TABLE_MIN_COL = 4
 
-function fitWidths(natural: number[], budget: number): number[] {
+/** Overflow-shrinking column layout for tables. Exported for tests. */
+export function fitWidths(natural: number[], budget: number): number[] {
   const widths = natural.map(w => Math.min(w, Math.max(TABLE_MIN_COL, budget)))
   for (const floor of [TABLE_MIN_COL, 1]) {
     let total = widths.reduce((a, b) => a + b, 0)

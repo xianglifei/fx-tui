@@ -17,5 +17,6 @@
     "verbatimModuleSyntax": true,
     "types": ["node"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["lib", "node_modules", "src/**/*.test.ts"]
 }

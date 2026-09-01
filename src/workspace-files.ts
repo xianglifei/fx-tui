@@ -86,7 +86,9 @@ export function fuzzyMatchPaths(query: string, candidates: readonly string[], li
   return matches.slice(0, limit)
 }
 
-function scorePath(query: string, path: string): number | null {
+/** Score one candidate path against the query; null = no subsequence match.
+ * Exported for tests. */
+export function scorePath(query: string, path: string): number | null {
   const basename = path.slice(path.lastIndexOf('/') + 1)
   let score = 0
   if (basename.startsWith(query)) score += 100
