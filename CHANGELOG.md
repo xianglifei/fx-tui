@@ -3,6 +3,26 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.21.0] - 2026-09-01
+
+### 重构：斜杠命令层拆分到 src/commands/ — index.ts 从 1708 行降到 806 行
+
+- **动机**：`main()` 约 1500 行，16 个命令 handler 与装配/事件接线/resize
+  重建/生命周期全部挤在一起；每次加命令都要在千行函数里找位置
+- **拆分**：新建 `src/commands/` 13 个模块——`types.ts` 定义 `CommandCtx`
+  注入面（live agent 绑定、settings、`switchSession`/`openExternalEditor`/
+  `exit`/主题重挂载等生命周期回调、/update 忙标志、调试通道），`pick.ts`
+  （复用问答卡的单选器），按域分组的 handler（session/model/btw/info/
+  config/theme/export/update/image），`menu.ts`（内置命令表 + 技能目录 +
+  菜单合成），`index.ts`（`createCommandRunner` 分发器：内置 → dsh 注册表
+  → /技能 手势兜底）
+- **留在 index.ts**：装配、事件订阅、审批/问答 provider、actions、resize
+  重建、自动压缩、后台更新定时器、shutdown——`switchSession`/`openExternal
+  Editor`/`shutdown` 属于进程生命周期操作，以回调形式注入命令层
+- **行为不变**：所有 handler 逐字搬迁（`store`→`c.store`、`agent`→`c.agent()`
+  等机械替换）；菜单顺序、分发优先级、错误提示完全一致；57 个测试与
+  typecheck/build 全绿
+
 ## [0.20.6] - 2026-09-01
 
 ### 性能：流式回复的 markdown 每帧只渲染一次 — 填充预算与视图共用一遍结果
