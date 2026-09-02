@@ -11,12 +11,25 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { FxSettings } from '../settings.js'
 import type { TuiStore } from '../store.js'
 import type { ThemeName } from '../ui/theme.js'
 
 /** The model/route selection carried by {@link ModelSelectionRef.current}. */
 export type ModelSelection = NonNullable<ModelSelectionRef['current']>
+
+/** A fork's lineage, carried from a command to {@link CommandCtx.startSession}.
+ *
+ * `events` must satisfy the agent factory's seed contract: contiguous from
+ * seq 0 and balanced — no open turn, no open step, no dangling tool call.
+ * {@link isSeedable} is the check that establishes it. */
+export interface SessionForkSeed {
+  /** Session the events were sliced from; becomes the new session's parent. */
+  readonly parentSession: string
+  /** The balanced prefix to replay into the new session. */
+  readonly events: readonly SessionEvent[]
+}
 
 /** One reasoning effort tier as reported by the provider adapter. */
 export interface EffortTier {
@@ -52,6 +65,16 @@ export interface CommandCtx {
   submitMessage(text: string): void
   /** Runner-owned lifecycle operations. */
   switchSession(sessionId: string): Promise<void>
+  /**
+   * Start a brand-new session and adopt it, optionally forked from the live
+   * one: no seed means an unrelated blank session; a seed replays that prefix
+   * under the current model selection.
+   *
+   * Resolves with the new session id, or `undefined` after a failure the
+   * runner has already reported — a successful start is deliberately silent so
+   * the command can name what it just did ("回退 3 轮", not "已切换到会话").
+   */
+  startSession(seed: SessionForkSeed | undefined): Promise<string | undefined>
   openExternalEditor(): Promise<void>
   exit(): Promise<void>
   /** Full-replay remount that recolors the transcript after a theme switch. */

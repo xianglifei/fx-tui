@@ -1,6 +1,6 @@
 {
   "name": "fx-tui",
-  "version": "0.21.6",
+  "version": "0.22.0",
   "description": "Interactive terminal surface for DeepSeek Harness (dsh) — an out-of-tree TUI bundle powered by Ink.",
   "type": "module",
   "main": "lib/index.js",
@@ -48,6 +48,7 @@
     "@deepseek-ai/dsh-agent": "0.1.1-rc.2",
     "@deepseek-ai/dsh-agent-default-model": "0.1.1-rc.2",
     "@deepseek-ai/dsh-attachment": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-credentials": "0.1.1-rc.2",
     "@deepseek-ai/dsh-cmdline": "0.1.1-rc.2",
     "@deepseek-ai/dsh-commands": "0.1.1-rc.2",
     "@deepseek-ai/dsh-compaction": "0.1.1-rc.2",

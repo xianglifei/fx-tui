@@ -20,7 +20,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ActiveQuestion } from '../question-bridge.js'
 import { FxSettings } from '../settings.js'
 import { TuiStore } from '../store.js'
-import type { CommandCtx, ModelSelection } from './types.js'
+import type { CommandCtx, ModelSelection, SessionForkSeed } from './types.js'
 
 const tempHomes: string[] = []
 
@@ -44,6 +44,8 @@ export interface CommandLog {
   readonly panels: { title: string; lines: readonly string[] }[]
   readonly submitted: string[]
   readonly switched: string[]
+  /** Every `startSession` seed, in call order; `undefined` = a fresh session. */
+  readonly started: (SessionForkSeed | undefined)[]
   readonly savedSelections: ModelSelection[]
   exitCount: number
   editorCount: number
@@ -58,8 +60,13 @@ export interface CtxHarness {
   readonly log: CommandLog
 }
 
-/** Build a CommandCtx whose every seam is inert and observable. */
-export function makeCtx(overrides: Partial<CommandCtx> = {}): CtxHarness {
+/** Build a CommandCtx whose every seam is inert and observable.
+ * `options.events` seeds the agent stub's session log for the commands that
+ * read it (/fork, /rewind, /trace, /export). */
+export function makeCtx(
+  overrides: Partial<CommandCtx> = {},
+  options: { readonly events?: readonly SessionEvent[] } = {},
+): CtxHarness {
   const store = new TuiStore('s1', 'p/m')
   const settings = new FxSettings(tempDshHome())
   const log: CommandLog = {
@@ -67,6 +74,7 @@ export function makeCtx(overrides: Partial<CommandCtx> = {}): CtxHarness {
     panels: [],
     submitted: [],
     switched: [],
+    started: [],
     savedSelections: [],
     exitCount: 0,
     editorCount: 0,
@@ -94,10 +102,11 @@ export function makeCtx(overrides: Partial<CommandCtx> = {}): CtxHarness {
 
   const agent = {
     id: 'agent-1',
+    status: 'idle',
     session: {
       id: 's1',
       header: { cwd: process.cwd() },
-      events: [],
+      events: options.events ?? [],
       deriveMessages: () => [],
     },
     steer: () => {},
@@ -151,6 +160,10 @@ export function makeCtx(overrides: Partial<CommandCtx> = {}): CtxHarness {
     switchSession: async (sessionId: string): Promise<void> => {
       log.switched.push(sessionId)
     },
+    startSession: async (seed: SessionForkSeed | undefined): Promise<string> => {
+      log.started.push(seed)
+      return 's-new'
+    },
     openExternalEditor: async (): Promise<void> => {
       log.editorCount += 1
     },
@@ -197,4 +210,10 @@ export async function skipPick(store: TuiStore): Promise<void> {
 /** Drive the store out of idle so the busy guards engage. */
 export function makeBusy(store: TuiStore): void {
   store.onEvent({ type: 'turn/start', data: {}, time: 0 } as unknown as SessionEvent)
+}
+
+/** Build one synthetic session event. `seq` is passed explicitly because the
+ * log-reading commands key off it (`seq === array index` in real logs). */
+export function sessionEvent(type: string, data: unknown, seq: number, time = seq * 1000): SessionEvent {
+  return { type, seq, time, data } as unknown as SessionEvent
 }

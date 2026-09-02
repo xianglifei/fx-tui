@@ -23,7 +23,7 @@ import { render } from 'ink'
 import type { Instance } from 'ink'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -63,10 +63,10 @@ import type { ThemeName } from './ui/theme.js'
 import { attachImagePaths } from './commands/image.js'
 import { createSkillCatalog } from './commands/menu.js'
 import { createCommandRunner } from './commands/index.js'
-import type { CommandCtx } from './commands/types.js'
+import type { CommandCtx, SessionForkSeed } from './commands/types.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.21.6'
+export const FX_TUI_VERSION = '0.22.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
@@ -187,7 +187,11 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
   let selectionRef: ModelSelectionRef = { current: selection, assembled: undefined }
   const agentOptions = { provider: selection.provider, model: selection.model }
   const setup = (agentCtx: Context): void => {
-    selectionRef = { current: selectionRef.current ?? selection, assembled: undefined }
+    // Mutate the ref in place. The command layer captured this object at
+    // startup, so replacing it would leave /model and /effort writing to a
+    // selection nobody reads — every session switch runs setup again.
+    selectionRef.current = selectionRef.current ?? selection
+    selectionRef.assembled = undefined
     installModelSelection(agentCtx, selectionRef)
   }
 
@@ -381,6 +385,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     debugLog,
     submitMessage: text => actions.onSubmit(text),
     switchSession,
+    startSession,
     openExternalEditor,
     exit: shutdown,
     remountForThemeChange: () => remountForThemeChange(),
@@ -393,31 +398,95 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
   ctx.on('skills/change', () => { void catalog.refresh() })
   const runCommand = createCommandRunner(commandCtx, catalog)
 
+  // Session transitions. `switchSession` resumes a persisted session and
+  // `startSession` mints a new one (optionally forked from the live one). They
+  // disagree about when to tear the outgoing agent down — resume refuses an id
+  // that is still live, while create must not leave us agentless if it fails —
+  // so each owns its ordering and they share only the guards and the rebinding.
+  let switching = false
+
+  /** Guard + durability flush before any session transition. */
+  async function beforeSwitch(busyNotice: string): Promise<boolean> {
+    if (agent.status === 'running') {
+      store.addNotice(busyNotice, 'warn')
+      return false
+    }
+    if (switching) {
+      store.addNotice('上一次会话切换还没结束', 'warn')
+      return false
+    }
+    switching = true
+    try {
+      await ctx.get('sessions')?.flush(agent.session)
+    } catch { /* best-effort durability before switching */ }
+    return true
+  }
+
+  /**
+   * Rebind the runner's live agent. Every listener keys off
+   * `agent.session.id`, so the outgoing agent stops mattering the moment this
+   * returns — disposing its handle is the caller's call.
+   */
+  function adoptSession(next: AgentHandle): void {
+    handle = next
+    agent = next.agent
+    // The new session may live in another workspace: project skills differ.
+    void catalog.refresh()
+    childAgents.clear()
+    syncChildCount()
+    autoCompactTried = false
+    store.reset(agent.id, modelLabel(), agent.session.events)
+  }
+
   async function switchSession(sessionId: string): Promise<void> {
     if (agent.session.id === sessionId) {
       store.addNotice('已在当前会话中')
       return
     }
-    if (agent.status === 'running') {
-      store.addNotice('当前任务运行中：先等它完成或按 Esc 中断，再切换会话', 'warn')
-      return
-    }
+    if (!await beforeSwitch('当前任务运行中：先等它完成或按 Esc 中断，再切换会话')) return
     try {
-      await ctx.get('sessions')?.flush(agent.session)
-    } catch { /* best-effort durability before switching */ }
-    try {
+      // resume refuses an id that is still live, so the outgoing agent goes first.
       await handle.dispose()
-      handle = await registry.resume({ resumeSessionId: SessionId(sessionId), agentOptions: agent.options, setup })
-      agent = handle.agent
-      // The new session may live in another workspace: project skills differ.
-      void catalog.refresh()
-      childAgents.clear()
-      syncChildCount()
-      autoCompactTried = false
-      store.reset(agent.id, modelLabel(), agent.session.events)
+      adoptSession(await registry.resume({ resumeSessionId: SessionId(sessionId), agentOptions: agent.options, setup }))
       store.addNotice(`已切换到会话 ${agent.id}`)
     } catch (error) {
       store.addNotice(`切换会话失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+    } finally {
+      switching = false
+    }
+  }
+
+  /** Start a fresh session: no seed is a blank unrelated one, a seed forks the
+   * named parent. Resolves with the new id, or undefined after reporting the
+   * failure — a successful start stays silent so the caller can say what it did. */
+  async function startSession(seed: SessionForkSeed | undefined): Promise<string | undefined> {
+    if (!await beforeSwitch('当前任务运行中：先等它完成或按 Esc 中断，再开始新会话')) return undefined
+    try {
+      const outgoing = handle
+      const events = seed?.events ?? []
+      const forked = events.length > 0
+      adoptSession(await registry.create({
+        sessionId: SessionId(`session-${randomUUID()}`),
+        meta: {
+          cwd: process.cwd(),
+          // /clear keeps the lineage but replays nothing, so it declares no seed
+          // boundary at all: an empty seed would only announce one.
+          ...(seed !== undefined ? { parentSession: SessionId(seed.parentSession) } : {}),
+          ...(forked ? { seedLength: events.length } : {}),
+        },
+        ...(forked ? { seed: events } : {}),
+        agentOptions: agent.options,
+        setup,
+      }))
+      // The new agent already owns the terminal by now; a teardown failure must
+      // not be reported as a failed start.
+      void outgoing.dispose().catch(() => { /* the outgoing session is already invisible */ })
+      return agent.id
+    } catch (error) {
+      store.addNotice(`新建会话失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+      return undefined
+    } finally {
+      switching = false
     }
   }
 

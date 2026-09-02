@@ -1,7 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
-import { currentSessionTitle, listSessionChoices, runRename } from './session.js'
-import { answerPick, awaitCard, cleanupTempHomes, makeCtx, skipPick } from './test-helpers.js'
+import {
+  currentSessionTitle, listSessionChoices, runClear, runFork, runNew, runResume, runRewind, runRename,
+} from './session.js'
+import { answerPick, awaitCard, cleanupTempHomes, makeCtx, sessionEvent, skipPick } from './test-helpers.js'
 
 afterEach(cleanupTempHomes)
 
@@ -83,7 +85,7 @@ describe('listSessionChoices filtering', () => {
     expect(log.notices[0]).toContain('没有匹配')
   })
 
-  it('hides subagent and child sessions from the switcher', async () => {
+  it('hides subagent sessions but keeps forked ones reachable', async () => {
     const ctx = ctxWithSessions([
       record('sess-parent'),
       record('sess-child', { parent: 'sess-parent' }),
@@ -95,8 +97,12 @@ describe('listSessionChoices filtering', () => {
     await skipPick(store)
     await pending
 
-    expect(card.item.options?.length).toBe(1)
-    expect(card.item.options?.[0]?.description).toContain('sess-parent')
+    // /fork, /clear and /rewind all leave the old log behind as the parent, so
+    // hiding children would hide the history those commands preserve.
+    const options = card.item.options ?? []
+    expect(options.length).toBe(2)
+    expect(options[0]?.description).toContain('sess-parent')
+    expect(options[1]?.label).toContain('分支')
   })
 
   it('disambiguates identical labels with a counter suffix', async () => {
@@ -177,5 +183,150 @@ describe('currentSessionTitle', () => {
     const { c } = makeCtx({ ctx })
 
     await expect(currentSessionTitle(c)).resolves.toBeUndefined()
+  })
+})
+
+/** One closed turn: user text in, nothing else. */
+function turn(seq: number, text: string): ReturnType<typeof sessionEvent>[] {
+  return [
+    sessionEvent('turn/start', { turn: 1 }, seq),
+    sessionEvent('user/message', { turn: 1, content: [{ type: 'text', text }], source: { kind: 'user' } }, seq + 1),
+    sessionEvent('turn/end', { turn: 1, reason: { kind: 'completed' } }, seq + 2),
+  ]
+}
+
+describe('runNew', () => {
+  it('starts a session with no lineage at all', async () => {
+    const { c, log } = makeCtx()
+    await runNew(c)
+
+    expect(log.started).toEqual([undefined])
+    expect(log.notices[0]).toContain('s-new')
+  })
+
+  it('stays silent when the runner reports a failure', async () => {
+    const { c, log } = makeCtx({ startSession: async () => undefined })
+    await runNew(c)
+
+    expect(log.notices).toEqual([])
+  })
+})
+
+describe('runClear', () => {
+  it('keeps the current session as the parent but replays nothing', async () => {
+    const { c, log } = makeCtx({}, { events: turn(0, 'hi') })
+    await runClear(c)
+
+    expect(log.started[0]?.parentSession).toBe('s1')
+    expect(log.started[0]?.events).toEqual([])
+    expect(log.notices[0]).toContain('s1')
+  })
+})
+
+describe('runFork', () => {
+  it('carries the whole log over and names the current session as parent', async () => {
+    const events = [...turn(0, '第一轮'), ...turn(3, '第二轮')]
+    const { c, log } = makeCtx({}, { events })
+    await runFork(c)
+
+    expect(log.started[0]?.parentSession).toBe('s1')
+    expect(log.started[0]?.events.map(event => event.seq)).toEqual([0, 1, 2, 3, 4, 5])
+  })
+
+  it('refuses to copy a log whose last turn never closed', async () => {
+    const events = [sessionEvent('turn/start', { turn: 1 }, 0)]
+    const { c, log } = makeCtx({}, { events })
+    await runFork(c)
+
+    expect(log.started).toEqual([])
+    expect(log.notices[0]).toContain('无法复制')
+  })
+})
+
+describe('runRewind', () => {
+  it('offers one target per user turn, newest first', async () => {
+    const events = [...turn(0, '第一轮'), ...turn(3, '第二轮')]
+    const { c, store } = makeCtx({}, { events })
+    const pending = runRewind(c)
+    const card = await awaitCard(store)
+    await skipPick(store)
+    await pending
+
+    expect(card.item.options?.length).toBe(2)
+    expect(card.item.options?.[0]?.label).toContain('第二轮')
+  })
+
+  it('drops the chosen turn and everything after it', async () => {
+    const events = [...turn(0, '第一轮'), ...turn(3, '第二轮')]
+    const { c, store, log } = makeCtx({}, { events })
+    const pending = runRewind(c)
+    const card = await awaitCard(store)
+    // Newest first, so the first option rewinds to just before the second turn.
+    await answerPick(store, card.item.options?.[0]?.label ?? '')
+    await pending
+
+    expect(log.started[0]?.events.map(event => event.seq)).toEqual([0, 1, 2])
+    expect(log.notices[0]).toContain('已回退 1 轮')
+  })
+
+  it('starts nothing when the picker is dismissed', async () => {
+    const { c, store, log } = makeCtx({}, { events: turn(0, 'hi') })
+    const pending = runRewind(c)
+    await awaitCard(store)
+    await skipPick(store)
+    await pending
+
+    expect(log.started).toEqual([])
+  })
+
+  it('says so when the turn is empty', async () => {
+    const { c, log } = makeCtx()
+    await runRewind(c)
+
+    expect(log.notices[0]).toContain('还没有可回退')
+  })
+
+  it('warns when the cut would undo a compaction', async () => {
+    const compacted = sessionEvent('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: { role: 'assistant', content: [{ type: 'text', text: '压缩摘要' }] },
+    }, 3)
+    Object.assign(compacted, { surfaceOp: { op: 'replace', start: 0, end: 2 } })
+    const events = [...turn(0, '第一轮'), compacted]
+    const { c, store } = makeCtx({}, { events })
+    const pending = runRewind(c)
+    const card = await awaitCard(store)
+    await skipPick(store)
+    await pending
+
+    expect(card.item.options?.[0]?.label).toContain('压缩')
+  })
+})
+
+describe('runResume', () => {
+  it('switches straight to an unambiguous id', async () => {
+    const { c, log } = makeCtx({ ctx: ctxWithSessions([record('sess-aaa'), record('sess-bbb')]) })
+    await runResume(c, 'sess-bbb')
+
+    expect(log.switched).toEqual(['sess-bbb'])
+  })
+
+  it('reports no match when the text is neither an id nor a keyword hit', async () => {
+    const { c, log } = makeCtx({ ctx: ctxWithSessions([record('sess-aaa')]) })
+    await runResume(c, 'zzz')
+
+    expect(log.switched).toEqual([])
+    expect(log.notices[0]).toContain('没有匹配')
+  })
+
+  it('opens the picker when given no argument at all', async () => {
+    const { c, store } = makeCtx({ ctx: ctxWithSessions([record('sess-aaa')]) })
+    const pending = runResume(c, '')
+    const card = await awaitCard(store)
+    await skipPick(store)
+    await pending
+
+    expect(card.item.options?.length).toBe(1)
   })
 })

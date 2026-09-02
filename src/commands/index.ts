@@ -4,14 +4,17 @@
  * injects the skill body itself). */
 
 import type { SkillCatalog } from './menu.js'
+import { runBalance, runLogin, runLogout, runProvider } from './account.js'
 import { runBtw } from './btw.js'
 import { runConfig } from './config.js'
 import { exportSession } from './export.js'
 import { runContext, runDoctor, runHelp, runStatus } from './info.js'
 import { runImage } from './image.js'
 import { listModelChoices, runEffort } from './model.js'
-import { listSessionChoices, runRename } from './session.js'
+import { listSessionChoices, runClear, runFork, runNew, runRename, runResume, runRewind } from './session.js'
+import { runSkills } from './skills.js'
 import { runTheme } from './theme.js'
+import { runTrace, runTree } from './trace.js'
 import { runUpdate } from './update.js'
 import type { CommandCtx } from './types.js'
 
@@ -20,7 +23,9 @@ export function createCommandRunner(c: CommandCtx, catalog: SkillCatalog): (line
     const trimmed = line.trim()
     const name = trimmed.slice(1).split(/\s+/)[0]?.toLowerCase() ?? ''
     const rest = trimmed.slice(1 + name.length).trim()
-    c.debugLog('command', trimmed)
+    // /login takes no key, but a user may type one anyway. This log runs before
+    // any handler can refuse it, so the argument is masked for that one command.
+    c.debugLog('command', name === 'login' && rest !== '' ? '/login ***' : trimmed)
     try {
       switch (name) {
         case 'help':
@@ -67,6 +72,42 @@ export function createCommandRunner(c: CommandCtx, catalog: SkillCatalog): (line
           return
         case 'image':
           await runImage(c, rest)
+          return
+        case 'new':
+          await runNew(c)
+          return
+        case 'clear':
+          await runClear(c)
+          return
+        case 'resume':
+          await runResume(c, rest)
+          return
+        case 'fork':
+          await runFork(c)
+          return
+        case 'rewind':
+          await runRewind(c)
+          return
+        case 'tree':
+          await runTree(c)
+          return
+        case 'trace':
+          runTrace(c)
+          return
+        case 'skills':
+          await runSkills(c, catalog)
+          return
+        case 'provider':
+          runProvider(c)
+          return
+        case 'login':
+          await runLogin(c)
+          return
+        case 'logout':
+          await runLogout(c)
+          return
+        case 'balance':
+          await runBalance(c)
           return
         case 'update': {
           const argTokens = rest.split(/\s+/).filter(token => token !== '')

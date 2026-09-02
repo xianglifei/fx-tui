@@ -10,7 +10,10 @@ vi.mock(import('./update.js'), () => ({
   runUpdate: vi.fn<typeof import('./update.js')['runUpdate']>(async () => {}),
 }))
 
-afterEach(cleanupTempHomes)
+afterEach(() => {
+  cleanupTempHomes()
+  vi.unstubAllGlobals()
+})
 
 const emptyCatalog: SkillCatalog = {
   list: () => [],
@@ -45,6 +48,28 @@ describe('createCommandRunner routing', () => {
     const { c, log } = makeCtx()
     await createCommandRunner(c, emptyCatalog)('/forget-approvals')
     expect(log.notices[0]).toContain('fx-tui-allowlist.json')
+  })
+
+  it('reaches a handler for every lifecycle and account command', async () => {
+    // /balance is the only one that would touch the network for real.
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 401, json: async () => ({}) })))
+    const { c, log } = makeCtx()
+    const run = createCommandRunner(c, emptyCatalog)
+
+    for (const name of ['new', 'clear', 'resume', 'fork', 'rewind', 'tree', 'trace', 'skills', 'provider', 'login', 'logout', 'balance']) {
+      await run(`/${name}`)
+      expect(log.notices.some(notice => notice.includes(`未知命令：/${name}`))).toBe(false)
+    }
+  })
+
+  it('masks a key typed as a /login argument before it reaches the debug log', async () => {
+    const seen: string[] = []
+    const { c } = makeCtx({ debugLog: (label, data) => { seen.push(`${label} ${String(data)}`) } })
+
+    await createCommandRunner(c, emptyCatalog)('/login sk-should-never-be-logged')
+
+    expect(seen.join('\n')).not.toContain('sk-should-never-be-logged')
+    expect(seen[0]).toContain('/login ***')
   })
 })
 

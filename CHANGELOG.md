@@ -3,6 +3,65 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.22.0] - 2026-09-02
+
+### 功能：补齐 12 条命令 —— 会话生命周期与账户环境盘查
+
+对照官方 dsh-tui 的命令面盘点后，fx-tui 此前缺 31 条。本版补上其中
+**功能上真正有价值、且在当前 fx profile 下跑得起来**的 12 条
+（其余如 `/mcp` `/hooks` `/workspace` `/preset` `/agents` 在 fx profile 里
+根本没有对应插件，补了也是空壳）。
+
+- **会话生命周期**（`src/commands/session.ts`，种子运算抽到新的
+  `src/commands/seed.ts`）：
+  - `/new` 开一个全新会话；`/clear` 清空但把旧日志留作父会话（`/tree`
+    能找回、`/rewind` 能回去），与 `/new` 唯一的区别就是这条血缘
+  - `/fork` 把当前会话复制一份并切到副本；`/rewind` 列出最近 20 个用户
+    轮次，选中后丢弃该轮及以后，同样切到新会话
+  - `/resume [id|关键词]`：命中唯一 id 就直接切过去，否则退化成
+    `/sessions` 的选择器
+  - 三者都走**新建**而非压缩/改写历史，原会话一律原样保留
+  - **fork/rewind 的实现约束**：绝不能 `sessions.fork()` + `registry.resume()`
+    —— fork 出的子会话仍 live 在 store，而持久化层对 live session 的
+    `prepare` 会直接抛错。正确路径是 `agents.create({ sessionId, seed,
+    meta: { parentSession, seedLength } })`，种子由 `seed.ts` 自己切片。
+    `isSeedable()` 在切片前校验平衡性（turn / step / 按 callId 配对的
+    tool call 三者各自闭合，未知插件事件一律放行），把 factory 的拒绝
+    提前翻成一句人能看懂的话
+- **会话盘查**（`src/commands/trace.ts`）：`/tree` 用
+  `sessionQuery.traceSession` 画家族树并给当前会话打 `*`；`/trace` 输出
+  事件时间线，把成百上千的 `assistant/chunk` 折叠成一行「流式输出 N 块」
+  并只显示最后 60 条
+- **环境与账户**（`src/commands/skills.ts`、`src/commands/account.ts`）：
+  `/skills` 列技能并标注来源目录；`/provider` 列出已注册与可配置
+  provider 及当前路由；`/login` `/logout` 只报状态和清除指引；
+  `/balance` 调 DeepSeek 官方只读余额接口（Node 内置 `fetch`，8s 超时，
+  六种失败态分别给话）
+- **`/login` `/logout` 刻意只读**：密钥作为命令行参数会先落到
+  `FX_TUI_DEBUG` 的调试日志里（`commands/index.ts` 的 `debugLog` 在任何
+  handler 之前执行），所以 fx-tui 从不接收密钥；同时给 `/login` 的参数
+  加了窄口罩，即使有人硬敲也不会写盘。`/balance` 的密钥只进请求头，
+  测试里断言面板文本永不包含它
+- **新增类型依赖**：`@deepseek-ai/dsh-credentials` 仅作 **devDependency
+  且只 `import type`** —— 它需要的是对 cordis `Context` 的声明合并
+  （让 `ctx.credentials` 有类型）和 `CredentialRef` 这个编译期 brand；
+  bundle 的 `files` 不含 `node_modules`，值导入会让运行时 `require` 炸。
+  运行时服务由 host 提供，**运行时依赖仍然是 0 新增**
+
+### 行为变更：`/sessions` 现在列出分支会话
+
+此前 `/sessions` 会滤掉所有带 `parentSession` 的会话。`/fork` `/clear`
+`/rewind` 产出的都是子会话，继续滤掉等于把用户刚保留下来的历史藏起来。
+现在只按 `origin !== 'subagent'` 过滤（子代理本来就不该手选），分支项
+在标签上带 `· 分支` 后缀。
+
+### 修复：切会话后 `/model` `/effort` 静默失效
+
+`setup()` 每次建/恢复 agent 都把 `selectionRef` **重新赋值**成一个新对象，
+而 `commandCtx` 在启动时按值捕获了旧对象 —— 于是会话切换之后 `/model`
+和 `/effort` 写的是一个没人读的 selection。改成就地赋值。这是既有 bug
+（`/sessions` 就会触发），本版新增 4 条切会话命令会把它从偶发变必现。
+
 ## [0.21.6] - 2026-09-02
 
 ### 功能：命令层测试基线（68→155）+ oxlint 静态检查进 CI + 三处 review 遗留修复
