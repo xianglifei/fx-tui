@@ -61,7 +61,9 @@ describe('runTree', () => {
 
     const panel = log.panels[0]
     expect(panel?.title).toBe('会话家族树')
-    expect(panel?.lines[0]).toBe('标题-s0 · 1-2 11:04 · work · s0')
+    // The stamp renders in the local zone, so only its shape is asserted — a
+    // literal time here passes in UTC+8 and fails on a UTC runner.
+    expect(panel?.lines[0]).toMatch(/^标题-s0 · \d+-\d+ \d{2}:\d{2} · work · s0$/)
     expect(panel?.lines[1]).toContain('* ')
     expect(panel?.lines[1]).toContain('标题-s1')
     // Two levels deep: the ancestor sits at depth 0, the live session at 1.
