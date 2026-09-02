@@ -58,7 +58,7 @@ export class ApprovalMemory {
     this.sessionKeys.add(key)
     try {
       mkdirSync(dirname(this.filePath), { recursive: true })
-      const file: AllowlistFile = { version: FILE_VERSION, always: [...this.persistentKeys].sort() }
+      const file: AllowlistFile = { version: FILE_VERSION, always: [...this.persistentKeys].toSorted() }
       writeFileSync(this.filePath, `${JSON.stringify(file, null, 2)}\n`, { encoding: 'utf8' })
     } catch {
       // persistence is best-effort; the in-memory grant still applies

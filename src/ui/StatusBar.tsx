@@ -94,7 +94,7 @@ export function StatusBar(props: StatusBarProps): ReactElement {
     kept[dropIdx] = ''
   }
   const visible = parts
-    .map((part, index) => ({ ...part, text: kept[index] ?? '' }))
+    .map((part, index) => Object.assign({}, part, { text: kept[index] ?? '' }))
     .filter(part => part.text !== '')
 
   // The spinner glyph renders before the left text but was never budgeted —
@@ -112,8 +112,6 @@ export function StatusBar(props: StatusBarProps): ReactElement {
     left = withReasoning
   } else if (displayWidth(withDetail) + spinnerCells <= budget) {
     left = withDetail
-  } else if (displayWidth(left) + spinnerCells <= budget) {
-    left = left
   }
   // else: bare label already fits the guaranteed minimum budget.
 

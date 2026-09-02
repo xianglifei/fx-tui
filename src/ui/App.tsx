@@ -129,7 +129,7 @@ export function App(props: AppProps): ReactElement {
   // StreamView: computing it twice doubled the streaming cost of every
   // 60ms token flush on long replies.
   const streamingLines = snap.streaming !== '' ? renderMarkdownLines(snap.streaming, width) : []
-  const { filler, live } = computeFiller(snap as Snapshot, width, termColumns, liveColumns, rows, inputHeight, streamingLines, rebuildSlack)
+  const { filler } = computeFiller(snap as Snapshot, width, termColumns, liveColumns, rows, inputHeight, streamingLines, rebuildSlack)
 
   // Flicker detector (Gemini CLI's useFlickerDetector): a dynamic frame taller
   // than the viewport means some height estimate missed — ink will scroll the

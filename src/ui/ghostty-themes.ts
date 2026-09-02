@@ -134,7 +134,7 @@ const DEFS: Record<GhosttyThemeId, GhosttyThemeDef> = {
 }
 
 export const GHOSTTY_THEMES: readonly (GhosttyThemeDef & { id: GhosttyThemeId })[] =
-  GHOSTTY_THEME_IDS.map(id => ({ id, ...DEFS[id] }))
+  GHOSTTY_THEME_IDS.map(id => Object.assign({ id }, DEFS[id]))
 
 export function ghosttyThemeDef(id: GhosttyThemeId): GhosttyThemeDef {
   return DEFS[id]

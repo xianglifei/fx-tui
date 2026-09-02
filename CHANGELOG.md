@@ -3,6 +3,38 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.21.6] - 2026-09-02
+
+### 功能：命令层测试基线（68→155）+ oxlint 静态检查进 CI + 三处 review 遗留修复
+
+- **命令层测试基线**：为 `src/commands/` 全部 11 个命令模块补齐单元测试
+  （menu/index/config/theme/image/pick/session/btw/model/info/export），
+  外加共享测试工具 `test-helpers.ts`（真实 `TuiStore` + 录制代理 + 惰性
+  kernel 桩）。测试规模 68 → **155**，20 个文件全绿；命令分发、瀑布
+  picker、中止语义（真实 `AbortSignal`）、只读目录失败路径等此前零覆盖
+  的行为首次有了回归保护
+- **静态检查**：引入 **oxlint 1.81**（`pnpm lint`，0 error / 0 warning
+  作为基线），CI 在 typecheck 之前新增 lint 闸。选型说明：原计划
+  typescript-eslint，但其 8.69 在 TypeScript 7 上直接抛错（官方支持上限
+  `<6.1.0`，TS 7.1 起才有支持计划），故改用自带 TS/TSX 解析器、不依赖
+  编译器 API 的 oxlint。配套：`.oxlintrc.json`（correctness + suspicious
+  报错、perf 告警；对声明合并载体 `import type {}`、终端控制字符正则、
+  TUI 有意为之的循环内 await 等误报项在配置层豁免并留注释）、
+  `pnpm-workspace.yaml`（pnpm 供应链策略对 oxlint 新发布 binding 的年龄
+  豁免，CI `--frozen-lockfile` 安装依赖此文件）
+- **修复**（8-27 review 遗留三项）：
+  - `src/index.ts` 的 `inject` 数组补上 `'tools'`——代码里确实
+    `ctx.get('tools')`，此前靠时序侥幸可用，声明缺失属于隐性错误
+  - `onSubmit` 的 `inputHistory.push` 加空文本守卫——纯图片消息不再往
+    ↑ 历史光标里塞空条目
+  - `package.json` 补 `bin` 字段（`fx` → `bin/fx`）并把 `bin` 纳入
+    `files`，`npm i -g` 后可直接执行
+- **lint 驱动的顺手清理**：删除 5 处死导入与 1 段无引用的 `HELP_TEXT`、
+  消除 8 处变量遮蔽（`matched`/`toolName`/`fileName`/`opts` 等重命名）、
+  `approval-memory` 改用 `toSorted`、`diff` 的 `new Array().fill()` 改
+  `Array.from`、两处 `map` 内对象展开改 `Object.assign`、移除
+  `StatusBar` 的自赋值死分支
+
 ## [0.21.5] - 2026-09-01
 
 ### 维护：GitHub Actions CI — typecheck / test / build 三道闸自动化

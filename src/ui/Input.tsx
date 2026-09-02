@@ -112,10 +112,6 @@ export interface Menu {
   expanded: boolean
 }
 
-const HELP_TEXT =
-  'Enter 发送（运行中＝注入当前轮）· Ctrl+J 换行 · Tab 运行中排队下一轮 · ↑↓ 历史/菜单 · Alt+↑ 取回消息 · ' +
-  'Ctrl+V 粘贴（含剪贴板图片） · Esc 中断/清空 · Ctrl+O 工具详情 · Ctrl+C 清空，空输入时双击退出 · /help 帮助'
-
 /** Visible entry rows the menu always occupies; a longer filtered list scrolls
  * through this window, a shorter one is blank-filled to keep the frame height. */
 const MENU_SLOTS = 8
@@ -245,6 +241,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
         const scroll = clampScroll(menuScrollRef.current, index, rows.length)
         menuScrollRef.current = scroll
         setMenu({ kind: 'files', query, rows, index, scroll, expanded: false })
+        return
       })
       return () => { cancelled = true }
     }

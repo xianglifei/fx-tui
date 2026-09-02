@@ -14,10 +14,10 @@
 
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { tmpdir, homedir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
 import { createElement } from 'react'
 import { render } from 'ink'
 import type { Instance } from 'ink'
@@ -25,7 +25,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, MessageId } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 // Declaration-merge carriers: importing these types registers the ctx keys and
@@ -66,7 +66,7 @@ import { createCommandRunner } from './commands/index.js'
 import type { CommandCtx } from './commands/types.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.21.5'
+export const FX_TUI_VERSION = '0.21.6'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
@@ -81,7 +81,7 @@ const AUTO_COMPACT_RATIO = 0.85
 export const name = 'fx-tui-runner'
 
 /** Core services required before the TUI can drive an agent. */
-export const inject = ['agentDefaultModel', 'agents', 'sessions', 'userQuestions', 'attachments', 'commands', 'llm', 'sessionQuery', 'skills']
+export const inject = ['agentDefaultModel', 'agents', 'sessions', 'userQuestions', 'attachments', 'commands', 'llm', 'sessionQuery', 'skills', 'tools']
 
 const USAGE = `fx-tui v${FX_TUI_VERSION} — DeepSeek Harness 的交互式终端界面
 
@@ -461,7 +461,7 @@ async function shutdown(): Promise<void> {
     agent.cancel({ kind: 'user' })
     await Promise.race([
       agent.whenIdle().catch(() => {}),
-      new Promise(resolve => { setTimeout(resolve, 3000) }),
+      new Promise(res => { setTimeout(res, 3000) }),
     ])
   }
   try {
@@ -545,7 +545,9 @@ function bottomFlush(): void {
       if (text !== '') content.push({ type: 'text', text })
       for (const image of images) content.push({ type: 'image', attachment: image.ref })
       if (content.length === 0) return
-      inputHistory.push(text)
+      // An image-only message carries no text; pushing '' would leave a blank
+      // entry the ↑ history cursor can land on.
+      if (text !== '') inputHistory.push(text)
       const message = createUserMessage({ content, source: { kind: 'user' } })
       const busy = store.getSnapshot().phase !== 'idle'
       const steer = busy && opts?.queue !== true
@@ -568,16 +570,16 @@ function bottomFlush(): void {
       void attachImagePaths(commandCtx, paths)
     },
     /** Clipboard image (Ctrl+V): the attachment channel is the same as /image. */
-    onClipboardImage(data: Uint8Array, name: string): void {
-      debugLog('clipboard-image', name)
+    onClipboardImage(data: Uint8Array, fileName: string): void {
+      debugLog('clipboard-image', fileName)
       void (async () => {
         try {
-          const [ref] = await ctx.attachments.saveImages([{ data, mediaType: 'image/png', name }])
+          const [ref] = await ctx.attachments.saveImages([{ data, mediaType: 'image/png', name: fileName }])
           if (ref === undefined) {
             store.addNotice('剪贴板图片保存失败：未返回引用', 'error')
             return
           }
-          store.addPendingImage(ref, `${name}（${ref.width}×${ref.height}，剪贴板）`)
+          store.addPendingImage(ref, `${fileName}（${ref.width}×${ref.height}，剪贴板）`)
           store.addNotice(`已附加剪贴板图片（${ref.width}×${ref.height}），将随下一条消息发送`)
         } catch (error) {
           store.addNotice(`剪贴板图片校验失败：${error instanceof Error ? error.message : String(error)}`, 'error')
@@ -678,9 +680,9 @@ function bottomFlush(): void {
   /** Shared remount body: unmount, reset the terminal, and replay the whole
    * transcript as the sole copy. `force` skips the size-unchanged guard —
    * theme switches remount at the same size to recolor the full transcript. */
-  const performRemount = async (options: { force?: boolean } = {}): Promise<void> => {
+  const performRemount = async (opts: { force?: boolean } = {}): Promise<void> => {
     const out = process.stdout
-    if (options.force !== true && out.columns === mountedCols && out.rows === mountedRows) return
+    if (opts.force !== true && out.columns === mountedCols && out.rows === mountedRows) return
     rebuilding = true
     try {
       instance?.unmount()
@@ -770,8 +772,8 @@ function bottomFlush(): void {
 /** Bridge the tools registry's presentation layer into the store. */
 function createPresenter(ctx: Context): ToolPresenter {
   return {
-    presentCall(name: string, rawArgs: string) {
-      const definition = ctx.get('tools')?.get(name)
+    presentCall(toolName: string, rawArgs: string) {
+      const definition = ctx.get('tools')?.get(toolName)
       if (definition?.presentCall === undefined) return undefined
       try {
         return definition.presentCall(parseArgs(rawArgs))
@@ -779,12 +781,12 @@ function createPresenter(ctx: Context): ToolPresenter {
         return undefined
       }
     },
-    presentResult(name: string, rawArgs: string, result: {
+    presentResult(toolName: string, rawArgs: string, result: {
       content: readonly ContentBlock[]
       isError: boolean
       meta: unknown
     }) {
-      const definition = ctx.get('tools')?.get(name)
+      const definition = ctx.get('tools')?.get(toolName)
       if (definition?.presentResult === undefined) return undefined
       try {
         const toolResult: ToolResult = {

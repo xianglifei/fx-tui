@@ -57,12 +57,12 @@ export async function runEffort(c: CommandCtx, arg: string): Promise<void> {
   const raw = arg.trim()
   if (raw !== '' && raw.toLowerCase() !== 'status') {
     const key = raw.toLowerCase()
-    const effort = reasoning.efforts.find(effort => effort.id.toLowerCase() === key || effort.name.toLowerCase() === key)
-    if (effort === undefined) {
+    const matched = reasoning.efforts.find(effort => effort.id.toLowerCase() === key || effort.name.toLowerCase() === key)
+    if (matched === undefined) {
       c.store.addNotice(`未知档位：${raw}（可用：${reasoning.efforts.map(effort => effort.id).join(' / ')}）`, 'warn')
       return
     }
-    applyEffort(c, current, effort.id, effort.name)
+    applyEffort(c, current, matched.id, matched.name)
     return
   }
   if (raw.toLowerCase() === 'status') {
@@ -78,7 +78,7 @@ export async function runEffort(c: CommandCtx, arg: string): Promise<void> {
     description: `${effort.id === active ? '当前' : effort.id === reasoning?.defaultEffort ? '默认' : effort.id}${effort.description !== undefined ? ` · ${truncateLine(effort.description, 26)}` : ''}`,
   })))
   if (chosen === undefined) return
-  const effort = reasoning.efforts.find(effort => effort.name === chosen)
+  const effort = reasoning.efforts.find(tier => tier.name === chosen)
   if (effort !== undefined) applyEffort(c, current, effort.id, effort.name)
 }
 
