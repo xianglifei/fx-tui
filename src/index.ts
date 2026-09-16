@@ -31,8 +31,8 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 // Declaration-merge carriers: importing these types registers the ctx keys and
 // events we consume (agents, agentDefaultModel, sessions, session/event,
-// approval/request, userQuestions, tokenMeter, compaction, sessionTitle,
-// cmdlineArgs, appExit, skills, skills/change).
+// agent/assistant-stream, approval/request, userQuestions, tokenMeter, todo/write,
+// compaction, sessionTitle, cmdlineArgs, appExit, skills, skills/change).
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-attachment'
@@ -43,7 +43,9 @@ import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-skill'
+import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-token-meter'
+import type {} from '@deepseek-ai/dsh-tool-todo'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-user-questions'
@@ -68,7 +70,7 @@ import { createCommandRunner } from './commands/index.js'
 import type { CommandCtx, SessionForkSeed } from './commands/types.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.23.0'
+export const FX_TUI_VERSION = '0.24.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
@@ -83,7 +85,7 @@ const AUTO_COMPACT_RATIO = 0.85
 export const name = 'fx-tui-runner'
 
 /** Core services required before the TUI can drive an agent. */
-export const inject = ['agentDefaultModel', 'agents', 'sessions', 'userQuestions', 'attachments', 'commands', 'llm', 'sessionQuery', 'skills', 'tools']
+export const inject = ['agentDefaultModel', 'agents', 'sessions', 'userQuestions', 'attachments', 'commands', 'llm', 'sessionQuery', 'skills', 'systemPrompt', 'tools']
 
 const USAGE = `fx-tui v${FX_TUI_VERSION} — DeepSeek Harness 的交互式终端界面
 
@@ -235,7 +237,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     cwd: process.cwd(),
     resumed: options.resume !== undefined,
   })
-  store.replay(agent.session.events)
+  store.replay(agent.session.snapshotEvents())
   store.finishReplay()
 
   // Live subagent tracking: children created against this session show a badge.
@@ -277,6 +279,15 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
         } catch { /* metering is display-only */ }
       }
     }
+  })
+
+  // Live streaming deltas ride the process-local assistant-stream channel
+  // since dsh 0.1.5 (the `assistant/chunk` session event is gone). Unlabeled
+  // listeners are admitted globally, so filter to the adopted agent — child
+  // agents stream against their own sessions.
+  ctx.on('agent/assistant-stream', payload => {
+    if (payload.agent.id !== agent.id) return
+    store.onAssistantStreamFrame(payload.frame)
   })
 
   // Auto-compaction (opt-in via /config): fires when the agent reaches idle
@@ -350,18 +361,15 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     return choice === 'reject' ? 'rejected' : 'allowed-once'
   })
 
-  const unregisterQuestions = ctx.userQuestions.registerProvider({
-    ask: (request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> => {
-      debugLog('question', request.questions.map(q => q.id))
-      const withdraw = (): void => { store.cancelQuestions() }
-      request.signal?.addEventListener('abort', withdraw, { once: true })
-      return store.askQuestions(request.questions).then(answer => {
-        request.signal?.removeEventListener('abort', withdraw)
-        return answer
-      })
-    },
+  ctx.on('user-questions/request', async (request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> => {
+    debugLog('question', request.questions.map(q => q.id))
+    const withdraw = (): void => { store.cancelQuestions() }
+    request.signal?.addEventListener('abort', withdraw, { once: true })
+    return store.askQuestions(request.questions).then(answer => {
+      request.signal?.removeEventListener('abort', withdraw)
+      return answer
+    })
   })
-  ctx.effect(() => () => { unregisterQuestions() })
 
   let instance: Instance | null = null
 
@@ -438,7 +446,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     childAgents.clear()
     syncChildCount()
     autoCompactTried = false
-    store.reset(agent.id, modelLabel(), agent.session.events)
+    store.reset(agent.id, modelLabel(), agent.session.snapshotEvents())
   }
 
   async function switchSession(sessionId: string): Promise<void> {

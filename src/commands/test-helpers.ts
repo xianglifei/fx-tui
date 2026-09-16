@@ -108,7 +108,7 @@ export function makeCtx(
     session: {
       id: 's1',
       header: { cwd: process.cwd() },
-      events: options.events ?? [],
+      snapshotEvents: () => options.events ?? [],
       deriveMessages: () => [],
     },
     steer: () => {},

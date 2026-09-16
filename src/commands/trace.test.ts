@@ -120,21 +120,27 @@ describe('runTrace', () => {
     expect(log.notices[0]).toContain('还没有任何事件')
   })
 
-  it('collapses a run of streaming chunks into one line', () => {
+  it('folds the message-embedded stream into a per-message chunk count', () => {
     const events = [
       sessionEvent('turn/start', { turn: 1 }, 0),
-      sessionEvent('assistant/chunk', { turn: 1, step: 1, delta: 'a' }, 1),
-      sessionEvent('assistant/chunk', { turn: 1, step: 1, delta: 'b' }, 2),
-      sessionEvent('assistant/chunk', { turn: 1, step: 1, delta: 'c' }, 3),
-      sessionEvent('turn/end', { turn: 1, reason: { kind: 'completed' } }, 4),
+      sessionEvent('assistant/message', {
+        turn: 1, step: 1,
+        message: { content: [{ type: 'text', text: 'a' }] },
+        stream: [
+          { type: 'text-chunks', time0: 1000, index: 0, dt: [10, 10], texts: ['a', 'b'] },
+          { type: 'reasoning-chunks', time0: 900, index: 1, dt: [5], texts: ['c'] },
+          { type: 'tool-call-chunks', time0: 1100, index: 2, dt: [10], id: 'c1', args: ['{}'] },
+        ],
+      }, 1),
+      sessionEvent('turn/end', { turn: 1, reason: { kind: 'completed' } }, 2),
     ]
     const { c, log } = makeCtx({}, { events })
 
     runTrace(c)
 
     const lines = log.panels[0]?.lines ?? []
-    expect(lines).toContain('#1 · +1.0s · 流式输出 3 块')
-    // Four events, three of which fold into one line.
+    // Text + reasoning deltas count; tool-call deltas do not.
+    expect(lines.some(line => line.includes('流式 3 块'))).toBe(true)
     expect(lines[0]).toContain('共 3 条记录')
   })
 

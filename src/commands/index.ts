@@ -53,7 +53,7 @@ export function createCommandRunner(c: CommandCtx, catalog: SkillCatalog): (line
           await runBtw(c, rest)
           return
         case 'context':
-          runContext(c)
+          await runContext(c)
           return
         case 'cost': case 'tokens':
           runCost(c)

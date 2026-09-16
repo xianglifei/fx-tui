@@ -3,6 +3,68 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.24.0] - 2026-09-17
+
+### 功能：dsh 全家桶 0.1.1-rc.2 → 0.1.5-rc.2，预研触发条件兑现
+
+0.20.2 时期的升级预研（`docs/dsh-0.1.2-alpha-upgrade-notes.md`）定下的动手
+条件是「`next` 通道脱离 0.1.1-rc.2 推进到 rc」。本次核实（2026-09-17）上游
+全家族已在 `next` 通道同步发布 **`0.1.5-rc.2`**（2026-09-10，`alpha` 已到
+0.1.6-alpha.1，按上游通道纪律不依赖），本版据此把 16 个 `@deepseek-ai/dsh-*`
+devDeps、2 个 peerDeps 与全局 host 一并升到 `0.1.5-rc.2`。**运行前提因此
+变为 host `dsh >= 0.1.5-rc.2`**——bundle 类型面必须与 host 同版本（既有纪律）。
+
+按预研的隔离探针方法实跑 `tsc`：0.1.5-rc.2 相对现状产生 **23 个编译错误，
+归因为五类 API 断点**（预研只覆盖 0.1.2-alpha.2 的前两类，后三类是
+0.1.3–0.1.5 新引入的，逐条修复后回到 0 错误）：
+
+- **提问机制从全局 provider 改为 waterfall 事件**（预研 §8.4 方案原样落地）：
+  `ctx.userQuestions.registerProvider({...})` 删除，改为
+  `ctx.on('user-questions/request', ...)`，函数体原样搬迁，手动 disposer
+  删除（cordis 对 `ctx.on` 自动回收）；`inject` 里的 `'userQuestions'` 保留
+- **TODO 域拆包**：`TodoItem` 类型从 `dsh-session` 移到新包 `dsh-tool-todo`
+  （字段一字未改，仅改 import 来源），并在 declaration-merge carrier 区补
+  显式 carrier 加载 `todo/write` 事件声明
+- **`Session.events` 快照 getter 变为 `snapshotEvents()` 方法**：/export
+  /fork /rewind /trace /context /cost 与启动 replay、会话切换 reset 共
+  10 处读日志点全部跟进；新版返回 frozen 且在后续 append 后保持稳定的数组
+- **`assistant/chunk` 会话事件被删除**：流式增量不再进会话日志，改走进程
+  本地的 **`agent/assistant-stream`** 事件（start/chunk/end 三种帧，chunk
+  帧携带与旧事件同构的 `StreamChunk` 与时间戳）。`TuiStore` 新增
+  `onAssistantStreamFrame()` 承接（text/reasoning delta 的 TPS 测量与
+  reasoning 计时逻辑不变、照旧走 flush 间隔批处理），挂载处按 agent id
+  过滤以排除子 agent 的流；/trace 对历史流式的统计相应改为从
+  `assistant/message` 内嵌的 `stream` 压缩记录数块数（工具调用 delta 不计）
+- **`EpochHeader.system` 字段被移除**：组装后的 system prompt 不再进
+  `request/header` 快照。/context 面板的系统提示估算改为按需调用
+  `ctx.systemPrompt.assemble()`（sections + contexts 字符数），服务缺失时
+  显示「不可估算」而非错误；该命令因此改为 async，新增
+  `dsh-system-prompt` types-only devDep 与 carrier、`inject` 补
+  `'systemPrompt'`
+
+### 依赖面
+
+- `@deepseek-ai/cordis` peerDep 与 devDep 从 `^4.0.1` 顺势提到 `^4.0.2`
+  （`dsh-agent@0.1.5-rc.2` 的 peer 要求）
+- 新增 types-only devDep `@deepseek-ai/dsh-tool-todo`、
+  `@deepseek-ai/dsh-system-prompt`（只取类型声明，零运行时依赖，
+  符合依赖克制约定）
+
+### 验证
+
+- 隔离探针：0.1.1-rc.2 基线 0 错误 → 0.1.5-rc.2 实测 23 错误 → 修复后
+  0 错误（方法与坑位见升级笔记 §10）
+- `oxlint`、双 tsconfig `typecheck`、vitest **222 用例**（24 文件）、
+  `tsc build` 全绿；测试侧同步更新：fake session 的 `events` 属性改为
+  `snapshotEvents()` stub，/context 用例改为 system-prompt 服务 stub，
+  /trace 流式折叠用例改为内嵌 stream 口径
+- host 冒烟（`dsh --version` = 0.1.5-rc.2）：`--dump-config` 验证
+  cordis.patch 三处 patch/insert 全部合成；伪终端真实 boot 渲染出
+  banner（fx-tui v0.24.0 + dsh 0.1.5-rc.2，inject 服务齐备、事件注册
+  成功）；`--help` 参数解析正常。真实对话的流式渲染、提问卡、审批卡与
+  状态栏 token 口径（上游 token-meter 内部整套更换）建议日常使用中留意
+- 升级笔记已增补 0.1.5-rc.2 实测章节，原 0.1.2-alpha 快照标注为过时
+
 ## [0.23.0] - 2026-09-16
 
 ### 功能：对照官方 dsh-tui 0.9.3 命令面复盘后，补上 /init /cost /restart

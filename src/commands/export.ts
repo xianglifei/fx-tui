@@ -17,7 +17,7 @@ export async function exportSession(c: CommandCtx): Promise<void> {
     '',
   ]
   const pendingNames = new Map<string, string>()
-  for (const event of agent.session.events) {
+  for (const event of agent.session.snapshotEvents()) {
     if (event.type === 'tool/call') {
       try {
         const parsed = JSON.parse(event.data.arguments) as Record<string, unknown>

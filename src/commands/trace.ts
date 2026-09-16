@@ -6,6 +6,7 @@
  */
 
 import { basename } from 'node:path'
+import type { AssistantStreamRecord } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionLineageNode, SessionRecord } from '@deepseek-ai/dsh-session-query'
 import { blocksToTextOf } from '../store.js'
@@ -69,7 +70,7 @@ export async function runTree(c: CommandCtx): Promise<void> {
 }
 
 export function runTrace(c: CommandCtx): void {
-  const events = c.agent().session.events
+  const events = c.agent().session.snapshotEvents()
   if (events.length === 0) {
     c.store.addNotice('当前会话还没有任何事件')
     return
@@ -85,30 +86,20 @@ export function runTrace(c: CommandCtx): void {
 function traceLines(events: readonly SessionEvent[]): string[] {
   const lines: string[] = []
   const origin = events[0]?.time ?? 0
-  // Streaming chunks arrive by the hundreds and say nothing individually, so a
-  // run of them collapses into one line anchored at its first seq.
-  let chunks = 0
-  let chunkSeq = 0
-  let chunkAt = 0
-  const flushChunks = (): void => {
-    if (chunks === 0) return
-    lines.push(`${prefix(chunkSeq, chunkAt - origin)}流式输出 ${chunks} 块`)
-    chunks = 0
-  }
   for (const event of events) {
-    if (event.type === 'assistant/chunk') {
-      if (chunks === 0) {
-        chunkSeq = event.seq
-        chunkAt = event.time
-      }
-      chunks += 1
-      continue
-    }
-    flushChunks()
     lines.push(`${prefix(event.seq, event.time - origin)}${labelOf(event)}`)
   }
-  flushChunks()
   return lines
+}
+
+/** Text + reasoning deltas packed in one settled assistant stream; tool-call
+ * deltas are excluded — they announce a tool card, not visible output. */
+function streamChunkCount(stream: readonly AssistantStreamRecord[]): number {
+  let count = 0
+  for (const record of stream) {
+    if (record.type === 'text-chunks' || record.type === 'reasoning-chunks') count += record.texts.length
+  }
+  return count
 }
 
 function prefix(seq: number, delta: number): string {
@@ -133,8 +124,13 @@ function labelOf(event: SessionEvent): string {
       return `步骤 ${event.data.step} 结束`
     case 'user/message':
       return `用户：${preview(blocksToTextOf(event.data.content))}`
-    case 'assistant/message':
-      return `助手：${preview(blocksToTextOf(event.data.message.content))}`
+    case 'assistant/message': {
+      // Streaming deltas are no longer log events (dsh 0.1.5 embeds the timed
+      // model stream in the message itself), so surface the packed count.
+      const streamed = streamChunkCount(event.data.stream)
+      const label = `助手：${preview(blocksToTextOf(event.data.message.content))}`
+      return streamed > 0 ? `${label} · 流式 ${streamed} 块` : label
+    }
     case 'tool/call':
       return `工具调用 ${event.data.name}（${argumentSummary(event.data.arguments)}）`
     case 'tool/result':

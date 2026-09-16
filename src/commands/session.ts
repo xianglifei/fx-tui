@@ -149,9 +149,9 @@ export async function runClear(c: CommandCtx): Promise<void> {
 /** `/fork`: copy the live session and move to the copy. */
 export async function runFork(c: CommandCtx): Promise<void> {
   const agent = c.agent()
-  // Own the array: `session.events` is a snapshot getter, and this outlives the
-  // agent it came from.
-  const events = [...agent.session.events]
+  // Own the array: `snapshotEvents()` returns a cached snapshot that stays
+  // stable after later appends, and this outlives the agent it came from.
+  const events = [...agent.session.snapshotEvents()]
   const check = isSeedable(events)
   if (!check.ok) {
     c.store.addNotice(`无法复制当前会话：${check.reason}（先按 Esc 中断，等这一轮落地再试）`, 'warn')
@@ -164,7 +164,7 @@ export async function runFork(c: CommandCtx): Promise<void> {
 /** `/rewind`: drop one turn and everything after it, into a forked session. */
 export async function runRewind(c: CommandCtx): Promise<void> {
   const agent = c.agent()
-  const events = [...agent.session.events]
+  const events = [...agent.session.snapshotEvents()]
   const turns = userTurns(events)
   if (turns.length === 0) {
     c.store.addNotice('当前会话还没有可回退的轮次')

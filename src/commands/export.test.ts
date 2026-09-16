@@ -24,7 +24,7 @@ afterEach(() => {
 function agentWithEvents(events: readonly unknown[]): Agent {
   return {
     id: 'session-abcdefghijklmnop',
-    session: { id: 'session-abcdefghijklmnop', header: { cwd: dir }, events, deriveMessages: () => [] },
+    session: { id: 'session-abcdefghijklmnop', header: { cwd: dir }, snapshotEvents: () => events, deriveMessages: () => [] },
   } as unknown as Agent
 }
 

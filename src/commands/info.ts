@@ -67,7 +67,7 @@ export async function runStatus(c: CommandCtx): Promise<void> {
 /** `/context`: water level plus a heuristic composition split (system /
  * tools / messages) — composition figures are estimates, the level and the
  * last provider usage report are not. */
-export function runContext(c: CommandCtx): void {
+export async function runContext(c: CommandCtx): Promise<void> {
   const meter = c.ctx.get('tokenMeter')
   const snapshot = c.store.getSnapshot()
   let total = snapshot.contextTokens
@@ -78,17 +78,26 @@ export function runContext(c: CommandCtx): void {
   }
   const window = snapshot.contextWindow
   const percent = window !== undefined && window > 0 ? ` · ${Math.round((total / window) * 100)}%` : ''
-  // Newest request/header reconstructs the envelope the next request sends.
+  // dsh 0.1.5 dropped `header.system`: the assembled prompt lives only in the
+  // system-prompt service, so re-assemble on demand for the heuristic split.
   let systemChars = 0
+  let systemAvailable = true
+  try {
+    const prompt = c.ctx.get('systemPrompt')
+    if (prompt === undefined) throw new Error('system-prompt service not loaded')
+    const assembly = await prompt.assemble()
+    systemChars = [...assembly.sections, ...assembly.contexts].reduce((sum, part) => sum + part.text.length, 0)
+  } catch { /* the split is a display heuristic; degrade to unavailable */ systemAvailable = false }
+  // Newest request/header reconstructs the tool envelope the next request sends.
   let toolCount = 0
   let toolChars = 0
-  for (let i = c.agent().session.events.length - 1; i >= 0; i--) {
-    const event = c.agent().session.events[i]!
+  const events = c.agent().session.snapshotEvents()
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]!
     if (event.type !== 'request/header') continue
-    systemChars = event.data.header.system?.length ?? 0
     const tools = event.data.header.tools ?? []
     toolCount = tools.length
-    toolChars = tools.reduce((sum, tool) => sum + JSON.stringify(tool).length, 0)
+    toolChars = tools.reduce((sum: number, tool) => sum + JSON.stringify(tool).length, 0)
     break
   }
   const estimate = (chars: number): number => Math.round(chars / 3)
@@ -97,7 +106,7 @@ export function runContext(c: CommandCtx): void {
     `上下文水位：${total} tokens${window !== undefined && window > 0 ? ` / ${window}` : ''}${percent}`,
     '',
     '组成（启发式估算，仅看大致占比）：',
-    `· 系统提示：约 ${estimate(systemChars)} tokens（${systemChars} 字符）`,
+    `· 系统提示：${systemAvailable ? `约 ${estimate(systemChars)} tokens（${systemChars} 字符）` : '不可估算（system-prompt 服务未加载）'}`,
     `· 工具定义：${toolCount} 个 · 约 ${estimate(toolChars)} tokens`,
     `· 对话消息：约 ${Math.max(0, total - estimate(systemChars) - estimate(toolChars))} tokens`,
     '',
@@ -187,7 +196,7 @@ export function runCost(c: CommandCtx): void {
   let cacheRead = 0
   let cacheWrite = 0
   let reasoning = 0
-  for (const event of c.agent().session.events) {
+  for (const event of c.agent().session.snapshotEvents()) {
     if (event.type !== 'assistant/message') continue
     const usage = (event.data as { usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number } }).usage
     if (usage === undefined) continue

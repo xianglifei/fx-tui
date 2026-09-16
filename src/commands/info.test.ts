@@ -13,7 +13,7 @@ afterEach(cleanupTempHomes)
 function agentWithEvents(events: readonly unknown[]): Agent {
   return {
     id: 'agent-1',
-    session: { id: 's1', header: { cwd: '/tmp/work' }, events, deriveMessages: () => [] },
+    session: { id: 's1', header: { cwd: '/tmp/work' }, snapshotEvents: () => events, deriveMessages: () => [] },
   } as unknown as Agent
 }
 
@@ -33,7 +33,7 @@ describe('/help', () => {
 describe('/context', () => {
   it('reports the water level and admits the split is an estimate', async () => {
     const { c, log } = makeCtx({ agent: () => agentWithEvents([]) })
-    runContext(c)
+    await runContext(c)
 
     const body = log.panels[0]?.lines.join('\n') ?? ''
     expect(log.panels[0]?.title).toBe('已加载上下文')
@@ -42,12 +42,17 @@ describe('/context', () => {
     expect(body).toContain('尚无用量记录')
   })
 
-  it('reads the newest request header for the system and tool split', async () => {
+  it('estimates the system prompt from the system-prompt service and the tools from the newest header', async () => {
+    const ctx = {
+      get: (key: string) => (key === 'systemPrompt'
+        ? { assemble: async () => ({ sections: [{ name: 'persona', text: 'x'.repeat(300) }], contexts: [], tools: [] }) }
+        : undefined),
+    } as unknown as Context
     const events = [
-      { type: 'request/header', data: { header: { system: 'x'.repeat(300), tools: [{ name: 'bash' }] } } },
+      { type: 'request/header', data: { header: { tools: [{ name: 'bash' }] } } },
     ]
-    const { c, log } = makeCtx({ agent: () => agentWithEvents(events) })
-    runContext(c)
+    const { c, log } = makeCtx({ ctx, agent: () => agentWithEvents(events) })
+    await runContext(c)
 
     const body = log.panels[0]?.lines.join('\n') ?? ''
     expect(body).toContain('300 字符')
@@ -59,7 +64,7 @@ describe('/context', () => {
       get: (key: string) => (key === 'tokenMeter' ? { measure: () => ({ totalTokens: 4321 }) } : undefined),
     } as unknown as Context
     const { c, log } = makeCtx({ ctx, agent: () => agentWithEvents([]) })
-    runContext(c)
+    await runContext(c)
 
     expect(log.panels[0]?.lines[0]).toContain('4321')
   })

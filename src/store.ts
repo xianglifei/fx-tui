@@ -12,9 +12,11 @@
  * name/args/text otherwise.
  */
 
+import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import type { SessionEvent, TodoItem } from '@deepseek-ai/dsh-session'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
 import { ApprovalBridge } from './approval-bridge.js'
@@ -311,23 +313,6 @@ export class TuiStore {
         this.items.push({ kind: 'user', text: blocksToText(message.content) })
         break
       }
-      case 'assistant/chunk': {
-        if (this.replaying) break
-        const chunk = ev.data.chunk
-        if (chunk.type === 'text-delta') {
-          // First visible delta opens the TPS measurement window; the paired
-          // assistant/message closes it against its usage report.
-          if (this.streamStartMs === null) this.streamStartMs = ev.time
-          this.streamBuf += chunk.text
-          this.phase = 'streaming'
-        } else if (chunk.type === 'reasoning-delta') {
-          if (this.reasoningStartMs === null) this.reasoningStartMs = ev.time
-          this.reasoningLastMs = ev.time
-          this.reasoningChars += chunk.text.length
-          if (this.reasoningHead.length < 200) this.reasoningHead += chunk.text
-        }
-        return // batched; flushed on the interval tick
-      }
       case 'assistant/message': {
         this.streamBuf = ''
         this.streamText = ''
@@ -456,6 +441,27 @@ export class TuiStore {
     // with React attached during a session switch): skip the O(N²) snapshot
     // rebuilds and let finishReplay commit exactly once at the end.
     if (!this.replaying) this.commit()
+  }
+
+  /** Fold one live assistant-stream chunk frame (`agent/assistant-stream`)
+   * into the view state — the process-local replacement for the retired
+   * `assistant/chunk` session event. Chunk frames stay batched on the flush
+   * interval, so like the old chunk case this path never commits. */
+  onAssistantStreamFrame(frame: AssistantStreamFrame): void {
+    if (frame.type !== 'chunk') return
+    const chunk = frame.chunk
+    if (chunk.type === 'text-delta') {
+      // First visible delta opens the TPS measurement window; the paired
+      // assistant/message closes it against its usage report.
+      if (this.streamStartMs === null) this.streamStartMs = frame.time
+      this.streamBuf += chunk.text
+      this.phase = 'streaming'
+    } else if (chunk.type === 'reasoning-delta') {
+      if (this.reasoningStartMs === null) this.reasoningStartMs = frame.time
+      this.reasoningLastMs = frame.time
+      this.reasoningChars += chunk.text.length
+      if (this.reasoningHead.length < 200) this.reasoningHead += chunk.text
+    }
   }
 
   /** Fold the whole persisted log of a resumed session (no streaming). */

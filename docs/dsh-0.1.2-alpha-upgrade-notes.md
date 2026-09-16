@@ -4,6 +4,12 @@
 > 对 fx-tui 的实际影响如何、怎么修」，供将来**不得不升级时**直接复用，避免重复调研。
 > 定位与 [windows-support-notes.md](windows-support-notes.md) 相同：调研已完成并暂缓，
 > 重启适配时以本文为准。
+>
+> **状态更新（2026-09-17，fx-tui v0.24.0）**：本文预判的升级已在
+> **`0.1.5-rc.2`** 上执行完毕，§12 是本次实测的增量记录（新断点与修复）。
+> 下文 §1–§11 是 2026-08-31 对 `0.1.2-alpha.2` 的历史快照，其中版本号、
+> dist-tag 与「建议不升级」的结论均已过时；§5–§8 的机制分析与修复方案
+> 仍然有效并在本次升级中原样兑现。
 
 - **核实日期**：2026-08-31
 - **核实对象**：fx-tui `v0.20.2`（`FX_TUI_VERSION`），锁定 dsh 全家桶 `0.1.1-rc.2`
@@ -449,3 +455,87 @@ npm install --no-audit --no-fund
    优先尝试把监听移进 `setup(agentCtx)`。
 4. 本文快照截止 2026-08-31。上游迭代很快（alpha.1 → alpha.2 仅隔数日），
    **重启适配时须重新核实版本号与 dist-tag**，不要直接照抄本文的版本号。
+
+---
+
+## 12. 0.1.5-rc.2 实测记录（2026-09-17，升级执行存档）
+
+> 本章是 §11.4 预判的「重启适配」，在 `next` 通道推进到 `0.1.5-rc.2`
+> （2026-09-10 全家族同步发布，`latest` 同步推进到 `0.1.5-rc.1`）后落地，
+> 对应 fx-tui v0.24.0。§9.2 定义的触发条件兑现。
+
+### 12.1 版本现状（2026-09-17）
+
+| 包 | `latest` | `next` | `alpha` |
+|---|---|---|---|
+| `@deepseek-ai/dsh` | `0.1.5-rc.1` | **`0.1.5-rc.2`** | `0.1.6-alpha.1` |
+| `dsh-agent` / `dsh-llm` / `dsh-tool-todo` 等 | 各异（勿望文生义） | **`0.1.5-rc.2`** | `0.1.6-alpha.1` |
+| `@deepseek-ai/cordis` | `4.0.2` | `4.0.1-rc.4` | — |
+
+`dsh-agent@0.1.5-rc.2` 的 peer 要求 `cordis ^4.0.2`，并新增
+`dsh-scope`/`dsh-system-prompt`/`dsh-typert-protocol`/`dsh-session-projection`/
+`dsh-invariants`/`dsh-util-values` 等 peer——全部由 host 提供，bundle 无需声明。
+
+### 12.2 实测断点（23 个编译错误 → 5 类，修复后 0 错误）
+
+按 §10 探针方法重跑（基线 0.1.1-rc.2 确认 0 错误后换目标版本）。
+§4.2 已记录的两类照旧；**§5、§6 之外新增三类**（0.1.3–0.1.5 引入）：
+
+3. **`Session.events` 快照 getter 删除 → `snapshotEvents(from?, to?)` 方法**
+   （`dsh-session`）：返回 frozen 数组，且「后续 append 后先前返回的快照保持
+   稳定」。fx-tui 共 10 处读日志点跟进（/export /fork /rewind /trace
+   /context /cost、启动 replay、会话切换 reset）。
+4. **`assistant/chunk` 会话事件删除**：流式增量不再进会话日志。替代通道是
+   `dsh-agent` 的 **`agent/assistant-stream`** cordis 事件（emit 模式，
+   process-local），帧类型 `AssistantStreamFrame`：
+   - `start`：attemptId / revision / turn / step
+   - `chunk`：`index` + `time` + `chunk: StreamChunk`（与旧事件 payload 同构，
+     fx-tui 的 text/reasoning delta 处理逻辑原样搬迁即可）
+   - `end`：`outcome` 为 `committed`（指向落地的 `assistant/message` 或
+     `assistant/attempt` 事件 seq）或 `abandoned`
+   事件注释原文："Chunk frames are transient; the loop appends one final
+   v2 `assistant/message` or `assistant/attempt` with the same stream"。
+   同时 `assistant/message` / `assistant/attempt` payload 新增内嵌
+   **`stream: AssistantStreamRecord[]`**（text-chunks / reasoning-chunks /
+   tool-call-chunks / chunk 四种压缩记录，`dsh-llm` 提供
+   `expandAssistantStream()` 等读取器）。
+5. **`EpochHeader.system` 字段移除**（`request/header` 快照不再含组装后的
+   system prompt）：/context 的系统提示估算改为按需
+   `ctx.systemPrompt.assemble()`（`dsh-system-prompt` 服务，异步 waterfall，
+   返回 sections + contexts + tools），该命令因此改 async。
+
+另有一处被连带错误掩盖的教训：探针阶段 `Session.events` 的 8 个 TS2339
+把 info.ts 后续属性访问的断点（`header.system`）盖住了——**修掉前一类
+断点后必须重跑 tsc**，总断点数是迭代中逐步收敛的。
+
+### 12.3 修复落点（fx-tui v0.24.0 实际 diff）
+
+- §8.1–§8.4 四处方案原样落地（新增 devDep 换成两个：`dsh-tool-todo` 与
+  `dsh-system-prompt`；cordis `^4.0.2`）
+- `store.ts`：`onEvent` 删 `assistant/chunk` case，新增
+  `onAssistantStreamFrame(frame)`（`end` 帧无需处理——`assistant/message`
+  事件照旧经 `session/event` 到达并负责结算清屏）
+- `index.ts`：新增 `ctx.on('agent/assistant-stream')` 订阅，按
+  `payload.agent.id !== agent.id` 过滤子 agent 流（与 approval/request
+  的过滤同型）
+- `trace.ts`：流式统计从「折叠 chunk 事件行」改为「message 行内附
+  `流式 N 块`」，块数 = message 内嵌 stream 里 text-chunks +
+  reasoning-chunks 的 `texts.length` 合计（tool-call delta 不计——它
+  对应工具卡，不是可见输出）
+- `info.ts`：`runContext` 改 async，systemChars 来自
+  `ctx.get('systemPrompt').assemble()`，服务缺失降级为「不可估算」文案；
+  `inject` 补 `'systemPrompt'`
+- 测试侧：fake session 的 `events` 属性全部改 `snapshotEvents()` stub
+  （test-helpers 与各测试内联 agent）；/context 用例改 system-prompt
+  服务 stub；/trace 折叠用例改内嵌 stream 口径
+
+### 12.4 运行时冒烟结果与遗留
+
+已验证：`dsh --profile fx --dump-config` 三处 patch/insert 全部合成；
+伪终端真实 boot 渲染出 banner（v0.24.0 + 0.1.5-rc.2，inject 服务齐备）；
+`--help` 正常。
+
+§11 遗留项在新版的对应物，**仍待日常使用核对**：token-meter 内部整套
+更换后的水位/命中率/tok/s 口径（§7.2）；waterfall 作用域语义（§5.2，
+提问卡不弹时优先把 `user-questions/request` 监听移进 `setup(agentCtx)`）；
+真实对话的流式渲染（`agent/assistant-stream` 未打标签监听的全局接纳语义）。
