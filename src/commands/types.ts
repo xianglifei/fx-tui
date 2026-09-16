@@ -77,6 +77,12 @@ export interface CommandCtx {
   startSession(seed: SessionForkSeed | undefined): Promise<string | undefined>
   openExternalEditor(): Promise<void>
   exit(): Promise<void>
+  /**
+   * Restart the host process and resume the live session in the replacement.
+   * Resolves without exiting only when the replacement could not be spawned —
+   * the runner has already reported why.
+   */
+  restart(): Promise<void>
   /** Full-replay remount that recolors the transcript after a theme switch. */
   remountForThemeChange(): Promise<void>
   /** /update busy flag, shared with the background auto-update pass. */

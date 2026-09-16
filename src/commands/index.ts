@@ -8,7 +8,7 @@ import { runBalance, runLogin, runLogout, runProvider } from './account.js'
 import { runBtw } from './btw.js'
 import { runConfig } from './config.js'
 import { exportSession } from './export.js'
-import { runContext, runDoctor, runHelp, runStatus } from './info.js'
+import { runContext, runCost, runDoctor, runHelp, runInit, runRestart, runStatus } from './info.js'
 import { runImage } from './image.js'
 import { listModelChoices, runEffort } from './model.js'
 import { listSessionChoices, runClear, runFork, runNew, runRename, runResume, runRewind } from './session.js'
@@ -54,6 +54,15 @@ export function createCommandRunner(c: CommandCtx, catalog: SkillCatalog): (line
           return
         case 'context':
           runContext(c)
+          return
+        case 'cost': case 'tokens':
+          runCost(c)
+          return
+        case 'init':
+          runInit(c)
+          return
+        case 'restart':
+          await runRestart(c)
           return
         case 'doctor':
           await runDoctor(c)

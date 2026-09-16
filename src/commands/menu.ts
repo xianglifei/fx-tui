@@ -14,12 +14,14 @@ export const builtinCommands: readonly MenuEntry[] = [
   { name: 'effort', description: '切换推理强度档位', kind: 'builtin' },
   { name: 'btw', description: '侧问：复用上下文单轮提问，不打断主任务', kind: 'builtin' },
   { name: 'context', description: '查看上下文水位与组成明细', kind: 'builtin' },
+  { name: 'cost', description: '查看本会话累计 token 用量与缓存命中率（/tokens 同义）', kind: 'builtin' },
   { name: 'doctor', description: '环境自检（Node/路由/密钥/终端）', kind: 'builtin' },
   { name: 'config', description: '查看 / 修改设置（权限、更新、通知、自动压缩）', kind: 'builtin' },
   { name: 'theme', description: '切换配色主题：自动 / 浅色 / 深色 / Ghostty 精选', kind: 'builtin' },
   { name: 'export', description: '导出当前会话为 Markdown', kind: 'builtin' },
   { name: 'edit', description: '用 $EDITOR 编写长消息', kind: 'builtin' },
   { name: 'image', description: '附加图片：<路径>… 或直接拖入终端；空参查看明细', kind: 'builtin' },
+  { name: 'init', description: '在当前目录生成 AGENTS.md 骨架（已存在则不覆盖）', kind: 'builtin' },
   { name: 'new', description: '开始一个新会话', kind: 'builtin' },
   { name: 'clear', description: '清空会话（原内容保留在父会话，/tree 可找回）', kind: 'builtin' },
   { name: 'resume', description: '按 id 或关键词恢复会话（无参＝会话选择器）', kind: 'builtin' },
@@ -33,6 +35,7 @@ export const builtinCommands: readonly MenuEntry[] = [
   { name: 'logout', description: '查看清除凭证的方法', kind: 'builtin' },
   { name: 'balance', description: '查询 DeepSeek 账户余额', kind: 'builtin' },
   { name: 'update', description: '拉取 fx-tui 最新代码并重建（git 克隆安装时可用）', kind: 'builtin' },
+  { name: 'restart', description: '重启进程并恢复当前会话（升级/卡顿后快速重生）', kind: 'builtin' },
   { name: 'exit', description: '退出 fx-tui', kind: 'builtin' },
 ]
 

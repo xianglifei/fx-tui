@@ -1,8 +1,11 @@
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { afterEach, describe, expect, it } from 'vitest'
-import { runContext, runHelp, runStatus } from './info.js'
-import { cleanupTempHomes, makeCtx } from './test-helpers.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { buildRestartArgs, runContext, runCost, runHelp, runInit, runRestart, runStatus } from './info.js'
+import { cleanupTempHomes, makeBusy, makeCtx, sessionEvent } from './test-helpers.js'
 
 afterEach(cleanupTempHomes)
 
@@ -88,5 +91,127 @@ describe('/status', () => {
     await runStatus(c)
 
     expect(log.panels[0]?.lines.join('\n')).toContain('已加载插件（0）')
+  })
+})
+
+describe('/init', () => {
+  const tempDirs: string[] = []
+  const tempCwd = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'fx-tui-init-'))
+    tempDirs.push(dir)
+    return dir
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop()
+      if (dir !== undefined) rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('creates a skeleton AGENTS.md in the working directory', () => {
+    const dir = tempCwd()
+    vi.spyOn(process, 'cwd').mockReturnValue(dir)
+    const { c, log } = makeCtx()
+    runInit(c)
+
+    const target = join(dir, 'AGENTS.md')
+    expect(existsSync(target)).toBe(true)
+    expect(readFileSync(target, 'utf8')).toContain('# AGENTS.md')
+    expect(log.panels[0]?.lines[0]).toContain(target)
+  })
+
+  it('refuses to overwrite an existing AGENTS.md', () => {
+    const dir = tempCwd()
+    vi.spyOn(process, 'cwd').mockReturnValue(dir)
+    writeFileSync(join(dir, 'AGENTS.md'), 'keep me', 'utf8')
+    const { c, log } = makeCtx()
+    runInit(c)
+
+    expect(log.notices[0]).toContain('未改动')
+    expect(readFileSync(join(dir, 'AGENTS.md'), 'utf8')).toBe('keep me')
+  })
+
+  it('reports a write failure instead of pretending success', () => {
+    const dir = tempCwd()
+    vi.spyOn(process, 'cwd').mockReturnValue(dir)
+    chmodSync(dir, 0o500)
+    const { c, log } = makeCtx()
+    try {
+      runInit(c)
+
+      expect(log.notices.some(notice => notice.startsWith('创建 AGENTS.md 失败'))).toBe(true)
+      expect(existsSync(join(dir, 'AGENTS.md'))).toBe(false)
+    } finally {
+      chmodSync(dir, 0o700)
+    }
+  })
+})
+
+describe('/cost', () => {
+  it('says so when the session has no completed calls', () => {
+    const { c, log } = makeCtx()
+    runCost(c)
+
+    expect(log.notices[0]).toContain('还没有用量记录')
+  })
+
+  it('folds every assistant usage report into session totals and a cache rate', () => {
+    const events = [
+      sessionEvent('assistant/message', { turn: 0, step: 0, message: {}, usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 200, cacheWriteTokens: 100 } }, 0),
+      sessionEvent('user/message', {}, 1),
+      sessionEvent('assistant/message', { turn: 1, step: 0, message: {}, usage: { inputTokens: 30, outputTokens: 70 } }, 2),
+      // A call the adapter reported no accounting for contributes nothing.
+      sessionEvent('assistant/message', { turn: 2, step: 0, message: {} }, 3),
+    ]
+    const { c, log } = makeCtx({}, { events })
+    runCost(c)
+
+    const body = log.panels[0]?.lines.join('\n') ?? ''
+    expect(log.panels[0]?.title).toContain('/cost')
+    expect(body).toContain('完成调用：2 次')
+    expect(body).toContain('未命中缓存 130')
+    expect(body).toContain('输出合计：120')
+    expect(body).toContain('缓存读 200')
+    // Billed input = 130 + 200 + 100 = 430 → hit rate 200/430 = 46.5%.
+    expect(body).toContain('46.5%')
+  })
+})
+
+describe('/restart', () => {
+  it('refuses while a turn is running', async () => {
+    const { c, store, log } = makeCtx()
+    makeBusy(store)
+    await runRestart(c)
+
+    expect(log.notices[0]).toContain('运行中')
+    expect(log.restartCount).toBe(0)
+  })
+
+  it('hands off to the runner respawn when idle', async () => {
+    const { c, log } = makeCtx()
+    await runRestart(c)
+
+    expect(log.restartCount).toBe(1)
+    expect(log.notices[0]).toContain('重启')
+  })
+})
+
+describe('buildRestartArgs', () => {
+  const hostArgv = ['/usr/local/bin/node', '/opt/dsh/lib/bin.js', '--profile', 'fx']
+
+  it('defaults the profile to fx and lands on the live session id', () => {
+    expect(buildRestartArgs(hostArgv, [], 's-live')).toEqual(['--profile', 'fx', '--resume', 's-live'])
+  })
+
+  it('keeps the profile the host was launched with plus other bundle args', () => {
+    expect(buildRestartArgs([...hostArgv, '--profile', 'work'], ['--flag'], 's-live'))
+      .toEqual(['--profile', 'work', '--flag', '--resume', 's-live'])
+  })
+
+  it('replaces a previous --resume (both spellings) with the live session', () => {
+    expect(buildRestartArgs(hostArgv, ['--resume', 's-old', '--resume=s-older'], 's-live'))
+      .toEqual(['--profile', 'fx', '--resume', 's-live'])
   })
 })

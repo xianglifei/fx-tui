@@ -3,6 +3,55 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.23.0] - 2026-09-16
+
+### 功能：对照官方 dsh-tui 0.9.3 命令面复盘后，补上 /init /cost /restart
+
+0.22.0 盘点「缺 31 条」时剩余命令的去留只有一句结论。本版把官方 TUI
+（`@deepseek-harness-tui/dsh-tui` 0.9.3，`LOCAL_COMMANDS` 共 49 条）逐条
+对照并读其源码验证可行性后落地三条，其余 19 条的结论是「不该补」：
+
+- `/init`：在当前目录生成 **AGENTS.md 通用骨架**（项目说明 + 构建/验证 +
+  协作约定三节）。已存在则提示并不覆盖；写失败（权限等）报错误而不是
+  假装成功
+- `/cost`（`/tokens` 同义别名）：从 `assistant/message` 事件的 usage
+  报告折叠出**全会话累计**——完成调用次数、计费输入合计（未命中缓存 +
+  缓存读 + 缓存写，provider 口径三者不相交）、输出与推理、缓存命中率、
+  当前上下文水位。与 `/context` 分工：那边看实时水位与最近一次请求，
+  这边看整场花费。零调用时提示而非展示空面板
+- `/restart`：重启宿主进程并以 `--resume <当前会话>` 拉起替身，升级或
+  状态异常后免于手动退出再 `fx --resume`。实现约束：profile 名从宿主
+  argv 恢复（bin/fx 传入，bundle 侧 cmdlineArgs 里没有）；旧 `--resume`
+  两种拼法都要剥掉再追加当前会话 id；子进程 detached + inherit 终端，
+  随后走既有 shutdown（unmount → flush → exit 0），替身要几秒才走到
+  会话加载，flush 早已完成；agent 运行中拒绝（沿用命令层 `phase`
+  守卫惯例）。配套把 `/update` 升级完成的提示从「退出后重新运行 fx」
+  改为引导 `/restart`
+
+### 结论：/compact 不做——上游注册表已经提供了
+
+`dsh-base` 的编排明确挂了 `command-compact`（`/compact`，自带 busy
+守卫与友好文案），fx-tui 的注册表 fallthrough 早已把它带到命令行与
+`/` 菜单（`/help` 也一直列着它），自动压缩（`/config autocompact`）
+走的又是同一个 compaction 服务。本地再实现只会与上游语义分叉，故
+0.23.0 不含 /compact 代码——这不是遗漏，是复盘后的明确取舍。
+
+### 复盘方法论存档
+
+官方 49 条中 fx-tui 缺 22 条，取舍口径：**补**（/init /cost /restart，
+不依赖缺失插件且增量价值明确）；**不补**（14 条：`/preset` `/hooks`
+`/mcp` `/workspace` 是 fx profile 无对应插件的空壳；`/plugins`
+`/activity` 依赖官方 TUI 私有体系；`/color` `/lang` fx-tui 已有对等物；
+`/vim` `/connect` 大工程低收益；`/tips` `/terminal-setup` `/add-dir`
+价值边缘；`/deepseek` 是彩蛋）；**已有等价物**（`/compact` 见上，
+`/recap` `/reload` `/thinking` `/agents` 留待真实需求出现再评估）。
+
+### 测试
+
+新增 11 个用例（211→222，24 文件全绿）：/init 三分支（创建/不覆盖/写失败）、
+/cost 折叠口径（累计与命中率、零调用）、/restart 忙碌守卫与交接、
+`buildRestartArgs` 纯函数三种 argv 重构。
+
 ## [0.22.1] - 2026-09-02
 
 ### 修复：/tree 测试的时区依赖（本地全绿、CI 必挂）

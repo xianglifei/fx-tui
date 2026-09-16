@@ -48,6 +48,7 @@ export interface CommandLog {
   readonly started: (SessionForkSeed | undefined)[]
   readonly savedSelections: ModelSelection[]
   exitCount: number
+  restartCount: number
   editorCount: number
   remountCount: number
 }
@@ -77,6 +78,7 @@ export function makeCtx(
     started: [],
     savedSelections: [],
     exitCount: 0,
+    restartCount: 0,
     editorCount: 0,
     remountCount: 0,
   }
@@ -169,6 +171,9 @@ export function makeCtx(
     },
     exit: async (): Promise<void> => {
       log.exitCount += 1
+    },
+    restart: async (): Promise<void> => {
+      log.restartCount += 1
     },
     remountForThemeChange: async (): Promise<void> => {
       log.remountCount += 1

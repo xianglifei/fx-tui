@@ -1,6 +1,7 @@
-/** Read-only introspection commands: /help, /status, /context, /doctor. */
+/** Read-only introspection commands: /help, /status, /context, /doctor —
+ * plus the three cheap lifecycle helpers /init, /cost and /restart. */
 
-import { existsSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { activeThemeName, themeDisplayLabel } from '../ui/theme.js'
@@ -19,9 +20,10 @@ export function runHelp(c: CommandCtx): void {
     'Ctrl+C 清空输入（空输入双击退出）',
     '',
     '内置命令：/help 帮助 · /status 运行状态 · /sessions [关键词] 切换会话 · /rename <标题> 重命名 ·',
-    '  /model 模型 · /effort 推理强度 · /btw <问题> 侧问 · /context 上下文明细 · /doctor 自检 ·',
+    '  /model 模型 · /effort 推理强度 · /btw <问题> 侧问 · /context 上下文明细 · /cost 会话用量 · /doctor 自检 ·',
     '  /config 设置（权限/更新/通知/自动压缩） · /theme 主题 · /export 导出 · /edit 外部编辑器 ·',
-    '  /image <路径…> 附加图片 · /update 升级自身 · /exit 退出',
+    '  /image <路径…> 附加图片 · /init 生成 AGENTS.md 骨架 · /restart 重启并恢复当前会话 ·',
+    '  /update 升级自身 · /exit 退出',
     '会话生命周期：/new 新会话 · /clear 清空（历史留在父会话） · /resume <id|关键词> 恢复 ·',
     '  /fork 复制 · /rewind 回退到某轮之前 · /tree 血缘树 · /trace 事件轨迹',
     '环境与账户：/skills 技能 · /provider provider 与路由 · /login 凭证状态 · /logout 清除指引 · /balance 余额',
@@ -136,4 +138,122 @@ export async function runDoctor(c: CommandCtx): Promise<void> {
   check(process.stdout.isTTY === true, '终端', `TTY=${process.stdout.isTTY === true ? '是' : '否'} · ${process.stdout.columns ?? '?'}×${process.stdout.rows ?? '?'} · TERM=${process.env.TERM ?? '(未设置)'}`)
   check(existsSync(process.cwd()), '工作目录', process.cwd())
   c.store.addPanel('环境自检 /doctor', lines)
+}
+
+/** `/init`: drop a generic AGENTS.md skeleton into the working directory so
+ * the agent has something to fill in — never overwrites an existing file. */
+export function runInit(c: CommandCtx): void {
+  const target = join(process.cwd(), 'AGENTS.md')
+  if (existsSync(target)) {
+    c.store.addNotice(`已存在 ${target}，未改动`)
+    return
+  }
+  const template = [
+    '# AGENTS.md',
+    '',
+    '（项目说明：用几句话描述这个仓库是什么、给谁用、整体结构如何。）',
+    '',
+    '## 构建与验证',
+    '',
+    '（写清构建、测试、静态检查的具体命令；任何改动提交前先全部跑通。）',
+    '',
+    '## 协作约定',
+    '',
+    '- 动手前先读完本文件；约定与实际代码冲突时，以代码为准并向维护者确认',
+    '- 改动保持最小聚焦，不顺手重构无关代码',
+    '- 提交信息说明动机与影响面，不写无 CHANGELOG 条目的提交（如项目有此约定）',
+    '',
+  ].join('\n')
+  try {
+    writeFileSync(target, template, 'utf8')
+  } catch (error) {
+    c.store.addNotice(`创建 AGENTS.md 失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+    return
+  }
+  c.store.addPanel('/init', [
+    `已创建 ${target}`,
+    '内容是通用骨架：把项目说明和构建/测试命令填成实际值后再提交入库。',
+  ])
+}
+
+/** `/cost`: cumulative session spend folded from the usage reports carried by
+ * completed assistant messages — /context shows the live water level and the
+ * last request, this shows the whole session. Counts are DISJOINT per the
+ * provider contract: billed input = uncached input + cache read + cache write. */
+export function runCost(c: CommandCtx): void {
+  let calls = 0
+  let input = 0
+  let output = 0
+  let cacheRead = 0
+  let cacheWrite = 0
+  let reasoning = 0
+  for (const event of c.agent().session.events) {
+    if (event.type !== 'assistant/message') continue
+    const usage = (event.data as { usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number } }).usage
+    if (usage === undefined) continue
+    calls += 1
+    input += usage.inputTokens
+    output += usage.outputTokens
+    cacheRead += usage.cacheReadTokens ?? 0
+    cacheWrite += usage.cacheWriteTokens ?? 0
+    reasoning += usage.reasoningTokens ?? 0
+  }
+  if (calls === 0) {
+    c.store.addNotice('本会话还没有用量记录（还没有完成过一次请求）')
+    return
+  }
+  const billedInput = input + cacheRead + cacheWrite
+  const rate = billedInput > 0 ? ((cacheRead / billedInput) * 100).toFixed(1) : '0.0'
+  const snapshot = c.store.getSnapshot()
+  const window = snapshot.contextWindow
+  const level = window !== undefined && window > 0
+    ? `${snapshot.contextTokens} / ${window}（${Math.round((snapshot.contextTokens / window) * 100)}%）`
+    : `${snapshot.contextTokens}`
+  const lines = [
+    `完成调用：${calls} 次`,
+    `输入合计（计费口径）：${billedInput} · 其中未命中缓存 ${input} · 缓存读 ${cacheRead} · 缓存写 ${cacheWrite}`,
+    `输出合计：${output}${reasoning > 0 ? ` · 推理 ${reasoning}` : ''}`,
+    `缓存命中率：${rate}%`,
+    `当前上下文水位：${level}`,
+    '（/context 可看水位组成估算与最近一次请求的明细）',
+  ]
+  c.store.addPanel('会话用量 /cost', lines)
+}
+
+/** `/restart`: respawn the host with the same profile and `--resume` the live
+ * session id, then exit. The pure argv rebuild is exported for tests. */
+export function buildRestartArgs(hostArgv: readonly string[], bundleArgs: readonly string[], sessionId: string): string[] {
+  // The profile pair is consumed by the launcher before the bundle sees the
+  // command line, so recover it from the host argv (bin/fx always passes one).
+  let profile = 'fx'
+  for (let i = 0; i < hostArgv.length - 1; i++) {
+    if (hostArgv[i] === '--profile') {
+      const value = hostArgv[i + 1]
+      if (value !== undefined && !value.startsWith('-')) profile = value
+    }
+  }
+  // Bundle args keep everything except a previous --resume (both spellings);
+  // the live session id is what a restart wants to land on.
+  const rest: string[] = []
+  for (let i = 0; i < bundleArgs.length; i++) {
+    const arg = bundleArgs[i] ?? ''
+    if (arg === '--resume') {
+      i++
+      continue
+    }
+    if (arg.startsWith('--resume=')) continue
+    rest.push(arg)
+  }
+  return ['--profile', profile, ...rest, '--resume', sessionId]
+}
+
+/** `/restart`: guard the busy case (a cancelled turn would defeat the point),
+ * then hand off to the runner-owned respawn. */
+export async function runRestart(c: CommandCtx): Promise<void> {
+  if (c.store.getSnapshot().phase !== 'idle') {
+    c.store.addNotice('当前任务运行中：先等它完成或按 Esc 中断，再重启', 'warn')
+    return
+  }
+  c.store.addNotice('正在重启进程并恢复当前会话…')
+  await c.restart()
 }

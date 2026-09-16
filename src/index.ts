@@ -13,7 +13,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -61,12 +62,13 @@ import { draftCapture } from './ui/Input.js'
 import { activeThemeName, resolveTheme, setActiveTheme } from './ui/theme.js'
 import type { ThemeName } from './ui/theme.js'
 import { attachImagePaths } from './commands/image.js'
+import { buildRestartArgs } from './commands/info.js'
 import { createSkillCatalog } from './commands/menu.js'
 import { createCommandRunner } from './commands/index.js'
 import type { CommandCtx, SessionForkSeed } from './commands/types.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.22.1'
+export const FX_TUI_VERSION = '0.23.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
@@ -388,6 +390,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     startSession,
     openExternalEditor,
     exit: shutdown,
+    restart: restartAndResume,
     remountForThemeChange: () => remountForThemeChange(),
     updating: () => updating,
     setUpdating: value => { updating = value },
@@ -539,6 +542,33 @@ async function shutdown(): Promise<void> {
     // flushing on exit is best-effort
   }
   await exit(0)
+}
+
+/** Respawn the host with the same profile and `--resume` of the live session,
+ * then exit. The child inherits the terminal and is detached so it survives
+ * our exit; it only reaches the session log after its own multi-second boot,
+ * by which time shutdown has flushed and released everything. Resolving
+ * without exiting means the child never spawned — already reported. */
+async function restartAndResume(): Promise<void> {
+  const script = process.argv[1]
+  if (script === undefined) {
+    store.addNotice('重启失败：无法定位宿主入口脚本', 'error')
+    return
+  }
+  const bundleArgs: readonly string[] = ctx.get('cmdlineArgs')?.get() ?? []
+  let child: ChildProcess
+  try {
+    child = spawn(process.execPath, [script, ...buildRestartArgs(process.argv, bundleArgs, agent.session.id)], {
+      detached: true,
+      stdio: 'inherit',
+      env: process.env,
+    })
+  } catch (error) {
+    store.addNotice(`重启失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+    return
+  }
+  child.unref()
+  await shutdown()
 }
 
 /**

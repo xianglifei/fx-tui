@@ -37,7 +37,7 @@ export async function runUpdate(c: CommandCtx, force: boolean): Promise<void> {
     if (outcome.ok && outcome.applied) {
       c.store.addPanel(
         'fx-tui 升级完成',
-        [...outcome.lines, '', '重启生效：空输入时双击 Ctrl+C 退出，重新运行 fx'],
+        [...outcome.lines, '', '重启生效：/restart 立即以新版本恢复当前会话（或退出后重新运行 fx）'],
       )
     } else if (outcome.ok) {
       c.store.addNotice(outcome.lines[0] ?? '已是最新')

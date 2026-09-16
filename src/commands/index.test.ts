@@ -56,10 +56,22 @@ describe('createCommandRunner routing', () => {
     const { c, log } = makeCtx()
     const run = createCommandRunner(c, emptyCatalog)
 
-    for (const name of ['new', 'clear', 'resume', 'fork', 'rewind', 'tree', 'trace', 'skills', 'provider', 'login', 'logout', 'balance']) {
+    for (const name of ['new', 'clear', 'resume', 'fork', 'rewind', 'tree', 'trace', 'skills', 'provider', 'login', 'logout', 'balance', 'cost', 'init']) {
       await run(`/${name}`)
       expect(log.notices.some(notice => notice.includes(`未知命令：/${name}`))).toBe(false)
     }
+  })
+
+  it('routes /tokens as an alias of /cost and /restart to the respawn callback', async () => {
+    const { c, log } = makeCtx()
+    const run = createCommandRunner(c, emptyCatalog)
+
+    await run('/cost')
+    await run('/tokens')
+    expect(log.notices.filter(notice => notice.includes('还没有用量记录')).length).toBe(2)
+
+    await run('/restart')
+    expect(log.restartCount).toBe(1)
   })
 
   it('masks a key typed as a /login argument before it reaches the debug log', async () => {
