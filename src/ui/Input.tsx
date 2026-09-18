@@ -11,6 +11,13 @@
  * A third arrival shape is a terminal file-drop: dropping a file onto the
  * window pastes its (quoted) path, which this editor offers to attach as an
  * image while the buffer holds nothing else — see interceptDrop below.
+ *
+ * The editor paints at most editorRowCap(stdout.rows) visual rows, sliding a
+ * window (with a one-row overflow indicator) over layoutEditor's wrap so the
+ * cursor stays visible. The cap bounds the input box to a fraction of the
+ * viewport no matter how large the draft grows — without it a big paste blows
+ * the splash-filler budget, the frame overflows the viewport, and ink's
+ * cursor model desyncs (the "input box jumped up" family's worst case).
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
@@ -23,7 +30,7 @@ import { isExistingImagePath, parsePathChunk } from '../path-drops.js'
 import { OSC11_REMNANT_RE } from '../terminal-bg.js'
 import { fuzzyMatchPaths, listWorkspaceFiles } from '../workspace-files.js'
 import { truncateLine } from './estimate.js'
-import { textRows } from './ink-text.js'
+import { textRows, wrapTextRows } from './ink-text.js'
 import { theme } from './theme.js'
 
 export interface MenuEntry {
@@ -131,6 +138,9 @@ export function InputBox(props: InputBoxProps): ReactElement {
   const dismissedQueryRef = useRef<string | null>(null)
   /** ←→ description-expansion flag, keyed by the query it belongs to. */
   const expandRef = useRef<{ query: string; expanded: boolean }>({ query: '', expanded: false })
+  /** First visible visual row of the editor's scroll window; adjusted during
+   * render (never painted from stale) and ignored by the height estimate. */
+  const editorScrollRef = useRef(0)
 
   const isEmpty = ed.lines.length === 1 && ed.lines[0] === ''
   const { stdout } = useStdout()
@@ -693,6 +703,27 @@ export function InputBox(props: InputBoxProps): ReactElement {
 
   // -- Render -------------------------------------------------------------------
 
+  // The editor draws at most editorRowCap(stdout.rows) visual (wrapped) rows,
+  // sliding a window over the layout so the cursor stays visible — a huge
+  // paste or draft can no longer grow the input box past a fraction of the
+  // viewport and blow the splash-filler budget (the "input box jumped" family's
+  // worst-case trigger). The window offset rides a ref: the input height the
+  // budget consumes is min(total, cap) + indicator, which does not depend on
+  // the offset, so the same-commit invariant of computeInputHeight is intact.
+  const innerColumns = Math.max(8, regionColumns - 4)
+  const layout = layoutEditor(ed.lines, innerColumns, ed.row, ed.col)
+  const rowCap = editorRowCap(stdout?.rows)
+  const editorCapped = layout.rows.length > rowCap
+  const visibleRows = Math.min(layout.rows.length, rowCap)
+  const maxEditorScroll = Math.max(0, layout.rows.length - visibleRows)
+  let editorScroll = Math.min(Math.max(0, editorScrollRef.current), maxEditorScroll)
+  // Edge-only slide, the completion menu's clampScroll feel: the window sits
+  // perfectly still until the cursor would leave it, then moves just enough.
+  if (layout.cursorRow < editorScroll) editorScroll = layout.cursorRow
+  if (layout.cursorRow >= editorScroll + visibleRows) editorScroll = layout.cursorRow - visibleRows + 1
+  editorScrollRef.current = editorScroll
+  const shownRows = layout.rows.slice(editorScroll, editorScroll + visibleRows)
+
   return (
     <Box flexDirection="column">
       {menu !== null && menu.rows.length > 0 && (
@@ -729,13 +760,21 @@ export function InputBox(props: InputBoxProps): ReactElement {
             <Text dimColor>{trayDetailText(pendingImages)}</Text>
           </>
         )}
-        {ed.lines.map((line, index) => (
-          <Text key={index}>
-            {index === ed.row
-              ? <CursorLine line={line} col={ed.col} />
-              : (line === '' ? ' ' : line)}
+        {shownRows.map((row, index) => (
+          <Text key={editorScroll + index}>
+            {editorScroll + index === layout.cursorRow
+              ? <CursorLine line={row} col={layout.cursorCol} maxWidth={innerColumns} />
+              : row}
           </Text>
         ))}
+        {editorCapped && (
+          // One reserved row whenever the layout is capped (its presence
+          // depends only on the row count, never on the window offset, so the
+          // estimator stays exact): where the window sits inside the draft.
+          <Text dimColor>
+            {truncateLine(overflowHint(layout.rows.length, editorScroll, visibleRows), innerColumns)}
+          </Text>
+        )}
       </Box>
     </Box>
   )
@@ -795,14 +834,103 @@ export function imageTrayRows(images: readonly PendingImage[], columns: number):
     textRows(trayDetailText(images), inner)
 }
 
+/** Floor on the visible editor rows: even a tiny terminal keeps the editor
+ * usable (pi-tui's editor uses the same 5). */
+const MIN_EDITOR_ROWS = 5
+
+/** Visible editor rows cap — a fraction of the viewport, pi-tui style — so a
+ * huge paste or draft adds an internal scroll instead of growing the input
+ * box toward the viewport height. Unknown or absurd row counts (the renderer
+ * treats ≥1000 the same way) fall back to the 24-row classic, which caps
+ * conservatively. */
+export function editorRowCap(termRows: number | undefined): number {
+  const rows = termRows !== undefined && termRows > 0 && termRows < 1000 ? termRows : 24
+  return Math.max(MIN_EDITOR_ROWS, Math.floor(rows * 0.3))
+}
+
+/** The editor's visual layout: every logical line pre-wrapped to the same
+ * rows Ink would render (wrapTextRows, ink's own wrap options), plus the
+ * cursor's position mapped onto them. InputBox paints a window over these
+ * rows; computeInputHeight counts min(rows, cap) from the same wrap. */
+export interface EditorLayout {
+  /** Visual rows of the whole buffer; an empty logical line renders as ' '. */
+  readonly rows: readonly string[]
+  /** Visual row index the cursor sits on. */
+  readonly cursorRow: number
+  /** Code-point column of the cursor within rows[cursorRow]. */
+  readonly cursorCol: number
+}
+
+/** Single-slot memo: InputBox re-renders on every store flush (streaming
+ * frames included) with an unchanged editor, and the wrap is the pricey part. */
+let layoutMemo: {
+  lines: readonly string[]
+  inner: number
+  row: number
+  col: number
+  layout: EditorLayout
+} | null = null
+
+export function layoutEditor(
+  lines: readonly string[],
+  inner: number,
+  edRow: number,
+  edCol: number,
+): EditorLayout {
+  const memo = layoutMemo
+  if (memo !== null && memo.lines === lines && memo.inner === inner && memo.row === edRow && memo.col === edCol) {
+    return memo.layout
+  }
+  const rows: string[] = []
+  let cursorRow = 0
+  let cursorCol = 0
+  lines.forEach((line, index) => {
+    const chunks = wrapTextRows(line === '' ? ' ' : line, inner)
+    if (index === edRow) {
+      // The wrap never drops characters, so walking code-point lengths lands
+      // the cursor on its chunk; the last-chunk fallback covers col == length.
+      let seen = 0
+      for (const [chunkIndex, chunk] of chunks.entries()) {
+        const length = Array.from(chunk).length
+        if (edCol < seen + length || chunkIndex === chunks.length - 1) {
+          cursorRow = rows.length + chunkIndex
+          cursorCol = Math.max(0, edCol - seen)
+          break
+        }
+        seen += length
+      }
+    }
+    rows.push(...chunks)
+  })
+  const layout: EditorLayout = {
+    rows,
+    cursorRow: Math.min(cursorRow, Math.max(0, rows.length - 1)),
+    cursorCol,
+  }
+  layoutMemo = { lines, inner, row: edRow, col: edCol, layout }
+  return layout
+}
+
+/** Content of the editor's overflow indicator row: where the scroll window
+ * sits inside the draft. Render-only — the row's PRESENCE is what the
+ * estimator counts, and that depends only on the row count. */
+function overflowHint(total: number, above: number, shown: number): string {
+  const below = total - above - shown
+  const parts = [`编辑区共 ${total} 行`]
+  if (above > 0) parts.push(`上方还有 ${above} 行`)
+  if (below > 0) parts.push(`下方还有 ${below} 行`)
+  return `…（${parts.join(' · ')}）`
+}
+
 /**
- * The input box's exact rendered row count: borders + wrapped editor rows +
- * optional attachment tray / free-text hint / completion pane. App calls this
- * in its render body so the splash-filler budget is computed in the SAME
- * commit that paints the input — a height that reaches the budget one paint
- * later (the old useLayoutEffect report) draws an oversized frame first, the
- * terminal scrolls it, and ink's incremental renderer never re-syncs its
- * cursor model, leaving the input stranded above the bottom row.
+ * The input box's exact rendered row count: borders + wrapped editor rows
+ * (capped at editorRowCap(rows) with a one-row overflow indicator past the
+ * cap) + optional attachment tray / free-text hint / completion pane. App
+ * calls this in its render body so the splash-filler budget is computed in
+ * the SAME commit that paints the input — a height that reaches the budget
+ * one paint later (the old useLayoutEffect report) draws an oversized frame
+ * first, the terminal scrolls it, and ink's incremental renderer never
+ * re-syncs its cursor model, leaving the input stranded above the bottom row.
  */
 export function computeInputHeight(state: {
   lines: readonly string[]
@@ -810,9 +938,13 @@ export function computeInputHeight(state: {
   trayRows: number
   freeTextHint: boolean
   columns: number
+  /** Terminal rows; undefined caps the editor at the 24-row fallback. */
+  rows?: number
 }): number {
   const inner = Math.max(8, state.columns - 4)
-  const editorRows = state.lines.reduce((n, line) => n + textRows(line === '' ? ' ' : line, inner), 0)
+  const totalEditorRows = state.lines.reduce((n, line) => n + textRows(line === '' ? ' ' : line, inner), 0)
+  const cap = editorRowCap(state.rows)
+  const editorRows = totalEditorRows <= cap ? totalEditorRows : cap + 1
   return 2 + editorRows + state.trayRows +
     (state.freeTextHint ? textRows(FREE_TEXT_HINT, inner) : 0) +
     (state.menuOpen ? MENU_SLOTS + 3 : 0)
@@ -913,15 +1045,34 @@ function spliceInto(ed: EditorState, body: string): EditorState {
   return { lines, row: ed.row + inserted.length - 1, col: Array.from(last).length }
 }
 
-function CursorLine(props: { line: string; col: number }): ReactElement {
-  const chars = Array.from(props.line)
-  const before = chars.slice(0, props.col).join('')
-  const at = chars[props.col]
-  const after = chars.slice(props.col + 1).join('')
+/**
+ * Cursor-row composition: the inverse-video cell is the character at `col`,
+ * or a trailing space at end-of-line — EXCEPT on a row already at full
+ * display width, where an appended cursor cell would wrap and add one
+ * unestimated visual row (the estimate/render mismatch family); there the
+ * last character carries the inverse video instead.
+ */
+export function cursorSegments(
+  line: string,
+  col: number,
+  maxWidth: number,
+): { before: string; at: string; after: string } {
+  const chars = Array.from(line)
+  if (col >= chars.length) {
+    if (chars.length > 0 && stringWidth(line) >= Math.max(1, maxWidth)) {
+      return { before: chars.slice(0, -1).join(''), at: chars[chars.length - 1]!, after: '' }
+    }
+    return { before: line, at: ' ', after: '' }
+  }
+  return { before: chars.slice(0, col).join(''), at: chars[col] ?? ' ', after: chars.slice(col + 1).join('') }
+}
+
+function CursorLine(props: { line: string; col: number; maxWidth: number }): ReactElement {
+  const { before, at, after } = cursorSegments(props.line, props.col, props.maxWidth)
   return (
     <>
       <Text>{before}</Text>
-      <Text inverse>{at ?? ' '}</Text>
+      <Text inverse>{at}</Text>
       <Text>{after}</Text>
     </>
   )

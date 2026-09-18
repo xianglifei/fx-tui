@@ -124,6 +124,8 @@ export function App(props: AppProps): ReactElement {
     // never empty), so the hint needs no history-cursor knowledge here.
     freeTextHint: snap.questionFreeText && isEmpty,
     columns: liveColumns,
+    // Caps the editor's visible rows so a huge draft cannot blow the budget.
+    rows,
   })
   // One markdown pass per frame, shared by the filler budget below and
   // StreamView: computing it twice doubled the streaming cost of every

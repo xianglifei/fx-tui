@@ -3,6 +3,38 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.25.0] - 2026-09-19
+
+### 功能：编辑器行数封顶——输入框不再随草稿无限长高
+
+输入编辑器此前对内容行数没有任何上限：一次几百行的粘贴（括号粘贴模式
+整块进来）会把 `computeInputHeight` 的估算推过视口高度，frame 溢出、
+终端物理滚动、ink 光标模型失步——正是 0.18.0–0.20.2 连续五个修复的
+「输入框跳起」家族的最坏触发条件。本版对齐 pi-tui（MiniMax Code 的
+底层渲染框架，见 `docs/ui-research-2026-08.md`）编辑器的做法，给编辑区
+加内滚动：
+
+- **可见行封顶**为视口高度的 30%、下限 5 行（`editorRowCap`，未知/异常
+  行数按 24 行兜底）；超出部分按 `layoutEditor` 的视觉行布局滑窗显示，
+  窗口采用与补全菜单相同的「边缘才滑动」手感，光标所在行始终可见
+- **溢出指示行**：封顶后编辑框内底部固定占一行（`…（编辑区共 N 行 ·
+  上方还有 X 行 · 下方还有 Y 行）`）指示窗口位置；指示行的**存在与否**
+  只取决于行数、与窗口偏移无关，估算与绘制仍然逐帧锁步
+- **估算与渲染共用一份换行**：新增 `wrapTextRows`（`ink-text.ts`，
+  与 `textRows` 同一换行参数）驱动的 `layoutEditor`——InputBox 直接
+  绘制预换行切片，App 的预算照旧走 `textRows` 计数，两者天然一致；
+  `computeInputHeight` 新增 `rows` 参数并按 `min(总行数, cap) + 指示行`
+  计费（`src/ui/App.tsx` 调用点跟进）
+- **顺手修掉一个边界 bug**：光标停在行尾且该行恰好占满整行宽时，
+  反显光标空格会把该行挤到 +1 列换行，凭空多出一行未估算的视觉行——
+  现在（`cursorSegments`）这种整满行改由行内最后一个字符承载反显，
+  宽度恒不溢出
+- **测试补到渲染层**：新增 `src/ui/input-height.test.ts`（cap 边界、
+  光标跨换行行映射、宽字符、估算/布局行数一致性）与
+  `src/ui/input-render.test.ts`——后者经真实 ink 渲染 InputBox，直接
+  断言帧高度等于 `computeInputHeight`，是本套件第一条渲染路径级的
+  估算锁步回归防护（vitest 下 ink 需伪造 TTY stdin 与 console.Console）
+
 ## [0.24.0] - 2026-09-17
 
 ### 功能：dsh 全家桶 0.1.1-rc.2 → 0.1.5-rc.2，预研触发条件兑现

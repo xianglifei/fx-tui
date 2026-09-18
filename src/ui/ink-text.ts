@@ -12,7 +12,15 @@
 
 import wrapAnsi from 'wrap-ansi'
 
+/** The exact visual rows Ink renders for `text` as a plain Text at `columns`
+ * cells. The chunks join back to the input verbatim (the wrap never drops
+ * characters), which is what lets the editor map a code-point cursor column
+ * onto its visual row. */
+export function wrapTextRows(text: string, columns: number): string[] {
+  return wrapAnsi(text, Math.max(8, columns), { trim: false, hard: true }).split('\n')
+}
+
 /** Terminal rows Ink renders for `text` as a plain Text at `columns` cells. */
 export function textRows(text: string, columns: number): number {
-  return wrapAnsi(text, Math.max(8, columns), { trim: false, hard: true }).split('\n').length
+  return wrapTextRows(text, columns).length
 }
