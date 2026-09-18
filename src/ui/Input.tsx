@@ -60,6 +60,12 @@ export interface InputBoxProps {
    * input above the bottom row. */
   ed: EditorState
   setEd: Dispatch<SetStateAction<EditorState>>
+  /** Visible editor rows resolved by App from the same-commit filler budget
+   * (editorRowsForSpace): when other live-region rows grow — a completion
+   * menu, streaming reply, approval card — the editor SHRINKS instead of
+   * pushing the frame past the viewport. Undefined falls back to the raw
+   * terminal-rows cap for standalone use. */
+  editorVisibleRows?: number
   /** Completion menu state, lifted to App for the same reason. */
   menu: Menu | null
   setMenu: Dispatch<SetStateAction<Menu | null>>
@@ -130,7 +136,7 @@ const MAX_FILE_MATCHES = 60
 const MENU_DESC_COLUMNS = 40
 
 export function InputBox(props: InputBoxProps): ReactElement {
-  const { store, history, frozen, questionFreeText, showFreeTextHint, pendingImages, ed, setEd, menu, setMenu, listCommands, runCommand, onSubmit, onRecallPending, onClipboardImage, onDropFiles, onInterrupt, onExit } = props
+  const { store, history, frozen, questionFreeText, showFreeTextHint, pendingImages, ed, setEd, editorVisibleRows, menu, setMenu, listCommands, runCommand, onSubmit, onRecallPending, onClipboardImage, onDropFiles, onInterrupt, onExit } = props
   const [histIdx, setHistIdx] = useState(-1)
   const [draft, setDraft] = useState<string | null>(null)
   const menuIndexRef = useRef(0)
@@ -703,16 +709,17 @@ export function InputBox(props: InputBoxProps): ReactElement {
 
   // -- Render -------------------------------------------------------------------
 
-  // The editor draws at most editorRowCap(stdout.rows) visual (wrapped) rows,
-  // sliding a window over the layout so the cursor stays visible — a huge
-  // paste or draft can no longer grow the input box past a fraction of the
-  // viewport and blow the splash-filler budget (the "input box jumped" family's
-  // worst-case trigger). The window offset rides a ref: the input height the
-  // budget consumes is min(total, cap) + indicator, which does not depend on
-  // the offset, so the same-commit invariant of computeInputHeight is intact.
+  // The editor draws at most rowCap visual (wrapped) rows, sliding a window
+  // over the layout so the cursor stays visible. App resolves the cap
+  // (editorVisibleRows) from the same-commit filler budget, so a menu, tray,
+  // or other live-region growth SHRINKS the editor instead of overflowing the
+  // viewport; the raw terminal-rows cap is only the standalone fallback. The
+  // window offset rides a ref: the input height the budget consumes does not
+  // depend on the offset, so the same-commit invariant of computeInputHeight
+  // is intact.
   const innerColumns = Math.max(8, regionColumns - 4)
   const layout = layoutEditor(ed.lines, innerColumns, ed.row, ed.col)
-  const rowCap = editorRowCap(stdout?.rows)
+  const rowCap = Math.max(1, editorVisibleRows ?? editorRowCap(stdout?.rows))
   const editorCapped = layout.rows.length > rowCap
   const visibleRows = Math.min(layout.rows.length, rowCap)
   const maxEditorScroll = Math.max(0, layout.rows.length - visibleRows)
@@ -848,6 +855,38 @@ export function editorRowCap(termRows: number | undefined): number {
   return Math.max(MIN_EDITOR_ROWS, Math.floor(rows * 0.3))
 }
 
+/** Rows the completion pane occupies inside the input-box column while open
+ * (fixed slots + hint row + round borders). App needs the number BEFORE the
+ * menu renders to carve the editor's budget, so it lives next to MENU_SLOTS. */
+export const MENU_PANE_ROWS = MENU_SLOTS + 3
+
+/** Exact wrapped row count of the editor buffer — shared by the App budget
+ * and the height estimate so both reason from one number. */
+export function countEditorRows(lines: readonly string[], inner: number): number {
+  return lines.reduce((n, line) => n + textRows(line === '' ? ' ' : line, inner), 0)
+}
+
+/** Resolve the editor's visible rows from the space the input box may occupy.
+ * Two caps combine: the base terminal-fraction cap, and — when App knows the
+ * rows available to the input box (`availableRows`, viewport minus banner,
+ * settled transcript, and other live-region rows) — a budget cap that makes
+ * the editor SHRINK as menus/panels/streaming grow around it. Reserves one
+ * row for the overflow indicator and one safety row so the box can never
+ * exceed `availableRows`; never below 1. */
+export function editorRowsForSpace(s: {
+  rows?: number
+  availableRows?: number
+  totalEditorRows: number
+  menuRows: number
+  trayRows: number
+  hintRows: number
+}): number {
+  const baseVisible = Math.min(s.totalEditorRows, editorRowCap(s.rows))
+  if (s.availableRows === undefined) return baseVisible
+  const budgetCap = Math.max(1, s.availableRows - s.menuRows - s.trayRows - s.hintRows - 4)
+  return Math.min(baseVisible, budgetCap)
+}
+
 /** The editor's visual layout: every logical line pre-wrapped to the same
  * rows Ink would render (wrapTextRows, ink's own wrap options), plus the
  * cursor's position mapped onto them. InputBox paints a window over these
@@ -923,14 +962,19 @@ function overflowHint(total: number, above: number, shown: number): string {
 }
 
 /**
- * The input box's exact rendered row count: borders + wrapped editor rows
- * (capped at editorRowCap(rows) with a one-row overflow indicator past the
- * cap) + optional attachment tray / free-text hint / completion pane. App
- * calls this in its render body so the splash-filler budget is computed in
- * the SAME commit that paints the input — a height that reaches the budget
- * one paint later (the old useLayoutEffect report) draws an oversized frame
- * first, the terminal scrolls it, and ink's incremental renderer never
- * re-syncs its cursor model, leaving the input stranded above the bottom row.
+ * The input box's exact rendered row count: borders + visible editor rows
+ * (capped, with a one-row overflow indicator past the cap) + optional
+ * attachment tray / free-text hint / completion pane. App calls this in its
+ * render body so the splash-filler budget is computed in the SAME commit
+ * that paints the input — a height that reaches the budget one paint later
+ * (the old useLayoutEffect report) draws an oversized frame first, the
+ * terminal scrolls it, and ink's incremental renderer never re-syncs its
+ * cursor model, leaving the input stranded above the bottom row.
+ *
+ * The editor's visible rows come from `editorVisibleRows` (App's budget
+ * resolution, also handed to InputBox as a prop) when provided, else from
+ * `editorRowsForSpace` over `availableRows`, else from the bare
+ * `editorRowCap(rows)` — exactly one of the three levels applies.
  */
 export function computeInputHeight(state: {
   lines: readonly string[]
@@ -940,14 +984,27 @@ export function computeInputHeight(state: {
   columns: number
   /** Terminal rows; undefined caps the editor at the 24-row fallback. */
   rows?: number
+  /** Rows available to the whole input box, per App's same-commit budget. */
+  availableRows?: number
+  /** Pre-resolved visible editor rows (App passes its editorRowsForSpace
+   * result so the estimate and the render consume one shared number). */
+  editorVisibleRows?: number
 }): number {
   const inner = Math.max(8, state.columns - 4)
-  const totalEditorRows = state.lines.reduce((n, line) => n + textRows(line === '' ? ' ' : line, inner), 0)
-  const cap = editorRowCap(state.rows)
-  const editorRows = totalEditorRows <= cap ? totalEditorRows : cap + 1
-  return 2 + editorRows + state.trayRows +
-    (state.freeTextHint ? textRows(FREE_TEXT_HINT, inner) : 0) +
-    (state.menuOpen ? MENU_SLOTS + 3 : 0)
+  const totalEditorRows = countEditorRows(state.lines, inner)
+  const menuRows = state.menuOpen ? MENU_PANE_ROWS : 0
+  const hintRows = state.freeTextHint ? textRows(FREE_TEXT_HINT, inner) : 0
+  const visible = state.editorVisibleRows ??
+    editorRowsForSpace({
+      rows: state.rows,
+      availableRows: state.availableRows,
+      totalEditorRows,
+      menuRows,
+      trayRows: state.trayRows,
+      hintRows,
+    })
+  const indicatorRows = totalEditorRows > visible ? 1 : 0
+  return 2 + visible + indicatorRows + state.trayRows + hintRows + menuRows
 }
 
 /** In-order subsequence match of `query` against a command name (case-insensitive).

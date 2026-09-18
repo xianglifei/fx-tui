@@ -16,7 +16,7 @@ import { computeInputHeight, editorRowCap, InputBox } from './Input.js'
  * the visible rows of the last frame (ANSI stripped). This is the only place
  * the suite exercises the actual render path, so the render side of the
  * estimate/render height lockstep is verified against ink itself. */
-async function renderInputBox(lines: readonly string[], row: number, col: number, columns: number, rows: number): Promise<string[]> {
+async function renderInputBox(lines: readonly string[], row: number, col: number, columns: number, rows: number, editorVisibleRows?: number): Promise<string[]> {
   const frames: string[] = []
   class Capture extends Writable {
     override _write(chunk: Buffer, _enc: string, cb: () => void): void {
@@ -57,6 +57,7 @@ async function renderInputBox(lines: readonly string[], row: number, col: number
       showFreeTextHint: false,
       pendingImages: [],
       ed: { lines: [...lines], row, col },
+      editorVisibleRows,
       setEd: noop,
       menu: null,
       setMenu: noop,
@@ -118,5 +119,14 @@ describe('InputBox render', () => {
     const rows = await renderInputBox(draft, 3, 0, 80, 40)
     expect(rows.length).toBe(2 + 4)
     expect(rows.some(row => row.includes('编辑区共'))).toBe(false)
+  })
+
+  it('honors a budget-resolved editorVisibleRows below the terminal cap', async () => {
+    const draft = Array.from({ length: 30 }, (_, i) => `草稿第 ${i + 1} 行`)
+    // App carves 4 rows out of the budget when a menu grows beside the editor
+    const rows = await renderInputBox(draft, 29, draft[29]!.length, 80, 30, 4)
+    expect(rows.length).toBe(2 + 4 + 1)
+    expect(rows.filter(row => row.includes('草稿第')).length).toBe(4)
+    expect(rows.some(row => row.includes('编辑区共 30 行'))).toBe(true)
   })
 })

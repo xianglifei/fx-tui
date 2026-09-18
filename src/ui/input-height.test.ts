@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import stringWidth from 'string-width'
-import { computeInputHeight, cursorSegments, editorRowCap, layoutEditor } from './Input.js'
+import { computeInputHeight, cursorSegments, editorRowCap, editorRowsForSpace, layoutEditor, MENU_PANE_ROWS } from './Input.js'
 import { textRows } from './ink-text.js'
 
 describe('editorRowCap', () => {
@@ -123,6 +123,95 @@ describe('layoutEditor', () => {
         }
       }
     }
+  })
+})
+
+describe('editorRowsForSpace', () => {
+  const space = (availableRows: number, total = 40, menuRows = 0): number => editorRowsForSpace({
+    rows: 30,
+    availableRows,
+    totalEditorRows: total,
+    menuRows,
+    trayRows: 0,
+    hintRows: 0,
+  })
+
+  it('ignores the budget when unavailable and returns the base cap', () => {
+    expect(editorRowsForSpace({ rows: 30, availableRows: undefined, totalEditorRows: 40, menuRows: 0, trayRows: 0, hintRows: 0 })).toBe(9)
+    expect(editorRowsForSpace({ rows: 30, availableRows: undefined, totalEditorRows: 3, menuRows: 0, trayRows: 0, hintRows: 0 })).toBe(3)
+  })
+
+  it('shrinks the editor to fit the space left beside a menu', () => {
+    // available 19 - 2 borders - 11 menu - 1 indicator - 1 safety = 4
+    expect(space(19, 40, MENU_PANE_ROWS)).toBe(4)
+    // without the menu the same space comfortably holds the base cap
+    expect(space(19)).toBe(9)
+  })
+
+  it('reserves the overflow indicator only when the cap actually engages', () => {
+    // total 6 fits the budget of 4? no — capped: 4 with indicator implied
+    expect(space(19, 6, MENU_PANE_ROWS)).toBe(4)
+    // generous space: uncapped drafts show everything
+    expect(space(30, 6)).toBe(6)
+  })
+
+  it('never drops below one row even when the space is absurd', () => {
+    expect(space(3, 40, MENU_PANE_ROWS)).toBe(1)
+    expect(space(0, 40)).toBe(1)
+  })
+
+  it('keeps the box within the available rows across shapes', () => {
+    for (const availableRows of [6, 10, 14, 19, 26, 34]) {
+      for (const total of [1, 5, 9, 12, 40]) {
+        for (const menuRows of [0, MENU_PANE_ROWS]) {
+          const visible = space(availableRows, total, menuRows)
+          const indicator = total > visible ? 1 : 0
+          const box = 2 + visible + indicator + menuRows
+          if (availableRows < menuRows + 5) {
+            // Degenerate: the chrome alone cannot fit — the clamp floors the
+            // editor at 1 row and the box legitimately overflows.
+            expect(visible).toBe(1)
+            continue
+          }
+          expect(box).toBeLessThanOrEqual(availableRows)
+        }
+      }
+    }
+  })
+})
+
+describe('computeInputHeight with a budget', () => {
+  const base = { menuOpen: false, trayRows: 0, freeTextHint: false }
+
+  it('charges the resolved visible rows plus the indicator', () => {
+    // budget 19 with the menu open: 4 editor rows + indicator
+    expect(computeInputHeight({
+      ...base,
+      lines: Array.from({ length: 40 }, () => 'x'),
+      columns: 80,
+      availableRows: 19,
+      editorVisibleRows: 4,
+    })).toBe(2 + 4 + 1)
+    // the same call resolving its own budget from availableRows agrees
+    expect(computeInputHeight({
+      ...base,
+      lines: Array.from({ length: 40 }, () => 'x'),
+      columns: 80,
+      availableRows: 19,
+      menuOpen: true,
+    })).toBe(2 + 4 + 1 + MENU_PANE_ROWS)
+  })
+
+  it('stays within the available rows with the menu open (TC6 regression)', () => {
+    // 80x30: banner 8 + fixed live 3 → available 19; menu 11 + box must fit
+    const height = computeInputHeight({
+      ...base,
+      menuOpen: true,
+      lines: Array.from({ length: 40 }, () => 'x'),
+      columns: 80,
+      availableRows: 19,
+    })
+    expect(height).toBeLessThanOrEqual(19)
   })
 })
 

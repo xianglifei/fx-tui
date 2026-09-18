@@ -26,7 +26,8 @@ import { renderFileDiffs } from '../diff.js'
 import { renderMarkdownLines } from '../markdown.js'
 import { BANNER_BOX_HEIGHT, WelcomeBanner } from './Banner.js'
 import { estimateApprovalHeight, estimateItemHeight, estimateQuestionHeight, formatElapsed, headTailPreview, questionHintText, questionOptionRow, truncateLine, userBarRows } from './estimate.js'
-import { computeInputHeight, imageTrayRows, seedToState } from './Input.js'
+import { computeInputHeight, countEditorRows, editorRowsForSpace, FREE_TEXT_HINT, imageTrayRows, MENU_PANE_ROWS, seedToState } from './Input.js'
+import { textRows } from './ink-text.js'
 import { InputBox } from './Input.js'
 import type { Menu } from './Input.js'
 import type { SubmitOptions } from './Input.js'
@@ -116,22 +117,49 @@ export function App(props: AppProps): ReactElement {
   // would push the frame top into the Static region and erase transcript rows.
   const rebuildSlack = props.rebuilding === true && firstFrameRef.current ? 2 : 0
   const isEmpty = ed.lines.length === 1 && ed.lines[0] === ''
-  const inputHeight = computeInputHeight({
-    lines: ed.lines,
-    menuOpen: menu !== null && menu.rows.length > 0,
-    trayRows: imageTrayRows(snap.pendingImages, liveColumns),
-    // An empty editor can only be un-browsing history (history entries are
-    // never empty), so the hint needs no history-cursor knowledge here.
-    freeTextHint: snap.questionFreeText && isEmpty,
-    columns: liveColumns,
-    // Caps the editor's visible rows so a huge draft cannot blow the budget.
-    rows,
-  })
+  const menuOpen = menu !== null && menu.rows.length > 0
+  const trayRows = imageTrayRows(snap.pendingImages, liveColumns)
+  const editorInner = Math.max(8, liveColumns - 4)
+  const hintRows = snap.questionFreeText && isEmpty ? textRows(FREE_TEXT_HINT, editorInner) : 0
   // One markdown pass per frame, shared by the filler budget below and
   // StreamView: computing it twice doubled the streaming cost of every
   // 60ms token flush on long replies.
   const streamingLines = snap.streaming !== '' ? renderMarkdownLines(snap.streaming, width) : []
-  const { filler } = computeFiller(snap as Snapshot, width, termColumns, liveColumns, rows, inputHeight, streamingLines, rebuildSlack)
+  // Same-commit input budget: the settled transcript and every live-region
+  // row the input shares the viewport with are computed HERE, the editor's
+  // visible rows are carved out of what remains (splash keeps the banner
+  // pinned; scroll phase only promises the live region itself), and only
+  // then is the input height finalized — a menu, tray, or streaming reply
+  // now SHRINKS the editor instead of overflowing the frame and stranding
+  // the input (0.13.0's "menu over tall draft" family, unfixable while the
+  // editor cap ignored its surroundings).
+  const settledHeight = computeSettledHeight(snap as Snapshot, width, termColumns)
+  const fixedLive = computeFixedLive(snap as Snapshot, width, liveColumns, streamingLines)
+  const splashPhase = rows !== undefined &&
+    BANNER_BOX_HEIGHT + settledHeight + fixedLive + MIN_INPUT_BOX_ROWS <= rows
+  const availableRows = rows === undefined
+    ? undefined
+    : splashPhase
+      ? rows - BANNER_BOX_HEIGHT - settledHeight - fixedLive
+      : rows - fixedLive
+  const editorVisibleRows = editorRowsForSpace({
+    rows,
+    availableRows,
+    totalEditorRows: countEditorRows(ed.lines, editorInner),
+    menuRows: menuOpen ? MENU_PANE_ROWS : 0,
+    trayRows,
+    hintRows,
+  })
+  const inputHeight = computeInputHeight({
+    lines: ed.lines,
+    menuOpen,
+    trayRows,
+    freeTextHint: snap.questionFreeText && isEmpty,
+    columns: liveColumns,
+    rows,
+    editorVisibleRows,
+  })
+  const filler = computeFiller(rows, settledHeight, fixedLive, inputHeight, rebuildSlack)
 
   // Flicker detector (Gemini CLI's useFlickerDetector): a dynamic frame taller
   // than the viewport means some height estimate missed — ink will scroll the
@@ -145,8 +173,17 @@ export function App(props: AppProps): ReactElement {
     const { height } = measureElement(node)
     if (height > rows) frameDebug('frame-overflow', { height, rows, version: snap.version })
   })
+  // The rebuild-only filler slack applies exactly once, but flipping the flag
+  // alone would leave the slack baked into the painted frame (the input box
+  // would rest two rows above the bottom until the next unrelated render) —
+  // schedule the correction commit synchronously, before this frame paints.
+  const [, setSlackResetTick] = useState(0)
   useLayoutEffect(() => {
-    firstFrameRef.current = false
+    if (firstFrameRef.current) {
+      firstFrameRef.current = false
+      if (props.rebuilding === true) setSlackResetTick(tick => tick + 1)
+      return
+    }
   })
 
   return (
@@ -214,6 +251,7 @@ export function App(props: AppProps): ReactElement {
           pendingImages={snap.pendingImages}
           ed={ed}
           setEd={setEd}
+          editorVisibleRows={editorVisibleRows}
           menu={menu}
           setMenu={setMenu}
           listCommands={props.listCommands}
@@ -613,27 +651,17 @@ function StreamView(props: { lines: readonly string[] }): ReactElement {
 // so item heights are estimated EXACTLY — the estimators live in estimate.ts,
 // shared with the resize rebuild.
 
+/** Borders + one editor row: the smallest input box the budget recognizes
+ * when deciding whether the banner is still on screen (splash phase). */
+const MIN_INPUT_BOX_ROWS = 3
+
 /**
- * Blank rows that keep the first screen at viewport height:
- * `rows - banner - settled transcript - live region`, clamped at 0.
- * `columns` widths the STATIC item estimators (they wrap at the full terminal
- * width); `liveColumns` widths the live-region card estimators — the dynamic
- * region is one column short (marginRight, never paints the last column), so
- * their wrap bases must shrink with it or the budget drifts from the render.
+ * Exact rendered height of the settled transcript, banner excluded (the
+ * filler reserves it separately via BANNER_BOX_HEIGHT). Rendered-height
+ * cache: transcript items are immutable, so each object's height is
+ * computed once per width (markdown wrapping is the pricey part).
  */
-function computeFiller(
-  snap: Snapshot,
-  width: number,
-  columns: number,
-  liveColumns: number,
-  rows: number | undefined,
-  inputHeight: number,
-  streamingLines: readonly string[],
-  slack = 0,
-): { filler: number; live: number } {
-  if (rows === undefined || rows <= 0 || rows >= 1000) return { filler: 0, live: 0 }
-  // Rendered-height cache: transcript items are immutable, so each object's
-  // height is computed once per width (markdown wrapping is the pricey part).
+function computeSettledHeight(snap: Snapshot, width: number, columns: number): number {
   const cache = fillerCache
   if (cache.width !== width) {
     cache.width = width
@@ -641,7 +669,6 @@ function computeFiller(
   }
   let settled = 0
   for (const item of snap.items) {
-    // The banner is accounted for by the BANNER_BOX_HEIGHT reservation below.
     if (item.kind === 'banner') continue
     const cached = cache.map.get(item)
     if (cached !== undefined) {
@@ -652,9 +679,25 @@ function computeFiller(
     cache.map.set(item, h)
     settled += h
   }
+  return settled
+}
 
-  const live =
-    (streamingLines.length > 0 ? streamingLines.length + 1 : 0) + // reply + lead gap
+/**
+ * Exact height of every live-region row the input box shares the viewport
+ * with — everything EXCEPT the input box itself, which is budgeted
+ * separately (editorRowsForSpace carves the editor out of what remains).
+ * `width` wraps the question-card estimate; `liveColumns` the rest — the
+ * dynamic region is one column short (marginRight, never paints the last
+ * column), so their wrap bases must shrink with it or the budget drifts
+ * from the render.
+ */
+function computeFixedLive(
+  snap: Snapshot,
+  width: number,
+  liveColumns: number,
+  streamingLines: readonly string[],
+): number {
+  return (streamingLines.length > 0 ? streamingLines.length + 1 : 0) + // reply + lead gap
     (snap.pendingTools.length > 0 ? 1 : 0) + // one line, even for parallel calls
     (snap.approval !== null ? estimateApprovalHeight(snap.approval, liveColumns) : 0) +
     (snap.question !== null ? estimateQuestionHeight(snap.question, width, liveColumns) : 0) +
@@ -663,10 +706,26 @@ function computeFiller(
     (snap.exitArmed ? 1 : 0) +
     1 + // status bar
     1 + // permission-mode line under the input
-    inputHeight +
     1 // trailing-newline budget: the first frame scrolls exactly its row count,
   // so one reserved row keeps the banner's top border on screen
-  return { filler: Math.max(0, rows - BANNER_BOX_HEIGHT - settled - live - slack), live }
+}
+
+/**
+ * Blank rows that keep the first screen at viewport height:
+ * `rows - banner - settled transcript - fixed live rows - input box`,
+ * clamped at 0. Sizing errs on the small side: a short filler only leaves a
+ * harmless gap above the status bar, while an oversized one would push the
+ * frame top into the Static region and erase transcript rows.
+ */
+function computeFiller(
+  rows: number | undefined,
+  settledHeight: number,
+  fixedLive: number,
+  inputHeight: number,
+  slack = 0,
+): number {
+  if (rows === undefined || rows <= 0 || rows >= 1000) return 0
+  return Math.max(0, rows - BANNER_BOX_HEIGHT - settledHeight - fixedLive - inputHeight - slack)
 }
 
 /** Width-keyed per-item height cache; replaced wholesale when the width changes. */
