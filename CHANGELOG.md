@@ -3,6 +3,44 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.30.0] - 2026-09-19
+
+### 功能：代码块语法高亮独立成组——每个主题用自己官方编辑器配色
+
+**动机**：此前代码块高亮从 UI 语义 token 派生（`highlightFromTokens` 把
+string→danger、function→warning、number→success、keyword→info），16 个
+主题里 15 个的代码块因此呈现「红字符串、黄函数名、绿数字」——不属于任
+何开发者熟悉的编辑器约定，是「主题数量多但观感乱」的最大来源。对照
+MiniMax Code（pi）的主题架构：语法层是独立 token 组，其 dark 主题直接
+采用 VS Code Dark+。
+
+**机制（SyntaxGroup）**：`Palette` 新增独立 `syntax` 组（keyword /
+function / string / number / comment / type / variable / operator /
+punctuation 九个角色），`highlightFromSyntax` 用它构建 cli-highlight
+主题（补齐旧版未覆盖的 `subst`/`params`/`variable`/`meta-keyword`/
+`meta-string` 等键），diff 标记仍用 diff 色保持 git diff 观感。
+
+- **内置深色**：语法九色直接取 **VS Code Dark+**（`#569CD6` 关键字、
+  `#CE9178` 字符串、`#6A9955` 注释、`#4EC9B0` 类型……），与 pi 同源；
+- **内置浅色**：取 **VS Code Light+**（`#0000FF` 关键字、`#A31515`
+  字符串、`#008000` 注释……）——同时消除浅色主题继续使用
+  cli-highlight `DEFAULT_THEME` 的结构特例，16 个主题的高亮构建路径
+  首次同构（浅色 hex 在任意亮底终端上都成立，不依赖终端色重映射）；
+- **14 个 Ghostty 移植主题**：新增逐主题语法层数据，全部**逐字采自各
+  主题自己的官方编辑器移植版**——Catppuccin（nvim groups + palette）、
+  TokyoNight（官方 prism extras）、Gruvbox（vscode-theme-gruvbox 源）、
+  Rosé Pine（官方 vscode 主题）、Dracula（vim：粉关键字/黄字符串/绿
+  函数的标志性观感）、Kanagawa（theme/palette 表）、Nord（vim + 色板
+  规范）、Ayu（vscode tokenColors）、Everforest（vim 高亮调用 + 调色
+  板）、Solarized Dark HC（vim 高亮映射套 HC ANSI 色调）。代码块从此
+  长成各主题作者设计的样子。
+
+**测试**：新增语法组结构断言（全主题九角色齐全且为合法 hex、内置主题
+钉 Dark+/Light+ 值、Dracula/Nord/Catppuccin 逐字抽查、高亮不再回落
+DEFAULT_THEME、Ghostty 语法角色对各自底色的对比度地板 ≥ 2.0——地板
+只为拦截抄写错误，不凌驾上游设计，Rosé Pine Dawn 官方金色调字符串即
+2.05）。主题/构建全绿。
+
 ## [0.29.0] - 2026-09-19
 
 ### 功能：@ 引用支持目录补全

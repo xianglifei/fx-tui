@@ -16,6 +16,14 @@
  * themes are ported verbatim (see ghostty-themes.ts): their 16-color ANSI
  * palettes are mapped onto the semantic tokens at module load.
  *
+ * Code-block highlighting is NOT part of that derivation. Every palette
+ * carries an independent `syntax` group (9 editor roles) transcribed from
+ * authoritative sources — VS Code Dark+/Light+ for the built-ins, each
+ * Ghostty theme's own official editor port for the ports — because string/
+ * keyword hues follow editor conventions, not UI semantics; recoloring a
+ * theme's syntax from its UI roles produced combinations (red strings,
+ * yellow function names) no editor convention prepares anyone for.
+ *
  * The dark tones stay in the brand's ~181° teal-cyan family and sit at a
  * pastel-bright lightness (readable on near-black), with the user message bar
  * inverted: a deep teal background carrying near-white text.
@@ -28,13 +36,27 @@ import chalk from 'chalk'
 import { DEFAULT_THEME } from 'cli-highlight'
 import type { Theme } from 'cli-highlight'
 import { GHOSTTY_THEMES, GHOSTTY_THEME_IDS, ghosttyThemeDef } from './ghostty-themes.js'
-import type { GhosttyThemeDef, GhosttyThemeId } from './ghostty-themes.js'
+import type { GhosttySyntax, GhosttyThemeDef, GhosttyThemeId } from './ghostty-themes.js'
 
 export type ThemeName = 'light' | 'dark' | GhosttyThemeId
 export type ThemeSetting = 'auto' | ThemeName
 
 /** Chalk style chain as used by the non-React render paths (diff/markdown). */
 export type ChalkStyle = typeof chalk.green
+
+/** The 9 editor syntax roles a palette's code-block highlighting is built
+ * from. Shape-mirrors GhosttySyntax so theme data passes through unchanged. */
+export interface SyntaxGroup {
+  readonly keyword: string
+  readonly function: string
+  readonly string: string
+  readonly number: string
+  readonly comment: string
+  readonly type: string
+  readonly variable: string
+  readonly operator: string
+  readonly punctuation: string
+}
 
 export interface Palette {
   /** Brand emphasis: banner, panel/input borders, spinner active, titles. */
@@ -54,6 +76,8 @@ export interface Palette {
   /** User message bar: hex by design, see the module comment. */
   readonly userBarBackground: string
   readonly userBarForeground: string
+  /** Editor syntax roles for code blocks; see the module comment. */
+  readonly syntax: SyntaxGroup
   /** Diff render paths (chalk). */
   readonly diff: {
     readonly add: ChalkStyle
@@ -68,8 +92,21 @@ export interface Palette {
     readonly link: ChalkStyle
     readonly image: ChalkStyle
   }
-  /** Code-block highlighting; light keeps cli-highlight's default theme. */
+  /** Code-block highlighting, built from `syntax` + diff add/del. */
   readonly highlight: Theme
+}
+
+const LIGHT_SYNTAX: SyntaxGroup = {
+  // VS Code Light+, the light counterpart of the Dark+ roles below.
+  keyword: '#0000ff',
+  function: '#795e26',
+  string: '#a31515',
+  number: '#098658',
+  comment: '#008000',
+  type: '#267f99',
+  variable: '#001080',
+  operator: '#000000',
+  punctuation: '#000000',
 }
 
 const LIGHT: Palette = {
@@ -82,6 +119,7 @@ const LIGHT: Palette = {
   muted: 'gray',
   userBarBackground: '#bdeef2',
   userBarForeground: 'black',
+  syntax: LIGHT_SYNTAX,
   diff: {
     add: chalk.green,
     del: chalk.red,
@@ -94,43 +132,55 @@ const LIGHT: Palette = {
     link: chalk.cyanBright.underline,
     image: chalk.cyan,
   },
-  highlight: DEFAULT_THEME,
+  highlight: highlightFromSyntax(LIGHT_SYNTAX, chalk.green, chalk.red),
 }
 
-/** Code-block highlighting derived from a palette's hex tokens: the default
- * theme's chalk.blue keywords and chalk.green comments vanish on dark
- * terminals, so every token that maps to a named color is re-mapped to the
- * palette's own tones; the rest inherits the default theme. */
-function highlightFromTokens(tokens: {
-  accent: string
-  warning: string
-  success: string
-  danger: string
-  info: string
-  approval: string
-  muted: string
-}): Theme {
-  const { accent, warning, success, danger, info, approval, muted } = tokens
+/** Build the cli-highlight theme from a palette's independent syntax group:
+ * every token that carries a hue is sourced from the 9 roles, so code blocks
+ * render in the selected theme's own editor conventions; diff markers keep
+ * the diff colors so `git diff` blocks inside code stay green/red. Tokens
+ * not listed here inherit cli-highlight's default (plain text). */
+function highlightFromSyntax(syntax: SyntaxGroup, addition: ChalkStyle, deletion: ChalkStyle): Theme {
   return {
     ...DEFAULT_THEME,
-    keyword: chalk.hex(info),
-    literal: chalk.hex(approval),
-    built_in: chalk.hex(accent),
-    type: chalk.hex(accent).dim,
-    number: chalk.hex(success),
-    string: chalk.hex(danger),
-    regexp: chalk.hex(danger),
-    class: chalk.hex(info),
-    function: chalk.hex(warning),
-    name: chalk.hex(info),
-    attr: chalk.hex(warning),
-    tag: chalk.hex(approval),
-    comment: chalk.hex(muted),
-    doctag: chalk.hex(muted),
-    meta: chalk.hex(muted),
-    addition: chalk.hex(success),
-    deletion: chalk.hex(danger),
+    keyword: chalk.hex(syntax.keyword),
+    built_in: chalk.hex(syntax.type),
+    literal: chalk.hex(syntax.number),
+    type: chalk.hex(syntax.type),
+    class: chalk.hex(syntax.type),
+    number: chalk.hex(syntax.number),
+    string: chalk.hex(syntax.string),
+    regexp: chalk.hex(syntax.string),
+    subst: chalk.hex(syntax.string),
+    comment: chalk.hex(syntax.comment),
+    doctag: chalk.hex(syntax.comment),
+    meta: chalk.hex(syntax.comment),
+    'meta-keyword': chalk.hex(syntax.keyword),
+    'meta-string': chalk.hex(syntax.string),
+    function: chalk.hex(syntax.function),
+    title: chalk.hex(syntax.function),
+    name: chalk.hex(syntax.keyword),
+    attr: chalk.hex(syntax.variable),
+    variable: chalk.hex(syntax.variable),
+    params: chalk.hex(syntax.variable),
+    tag: chalk.hex(syntax.keyword),
+    addition,
+    deletion,
   }
+}
+
+const DARK_SYNTAX: SyntaxGroup = {
+  // VS Code Dark+ — the syntax palette the entire industry's users already
+  // know; also pi/coding-agent's choice for its dark theme.
+  keyword: '#569cd6',
+  function: '#dcdcaa',
+  string: '#ce9178',
+  number: '#b5cea8',
+  comment: '#6a9955',
+  type: '#4ec9b0',
+  variable: '#9cdcfe',
+  operator: '#d4d4d4',
+  punctuation: '#d4d4d4',
 }
 
 const DARK_TOKENS = {
@@ -147,6 +197,7 @@ const DARK: Palette = {
   ...DARK_TOKENS,
   userBarBackground: '#0f3a40',
   userBarForeground: '#d9f7fa',
+  syntax: DARK_SYNTAX,
   diff: {
     add: chalk.hex(DARK_TOKENS.success),
     del: chalk.hex(DARK_TOKENS.danger),
@@ -159,7 +210,7 @@ const DARK: Palette = {
     link: chalk.hex(DARK_TOKENS.accent).underline,
     image: chalk.hex(DARK_TOKENS.accent),
   },
-  highlight: highlightFromTokens(DARK_TOKENS),
+  highlight: highlightFromSyntax(DARK_SYNTAX, chalk.hex(DARK_TOKENS.success), chalk.hex(DARK_TOKENS.danger)),
 }
 
 // -- Color math over #rrggbb ---------------------------------------------------
@@ -215,6 +266,10 @@ function mixHex(a: string, b: string, t: number): string {
  *
  * The user message bar is the theme background tinted towards the accent
  * (deeper for dark, lighter for light), carrying the theme foreground.
+ *
+ * The editor syntax layer skips the derivation entirely: def.syntax is the
+ * theme's own official editor palette (see ghostty-themes.ts), passed
+ * through verbatim.
  */
 function ghosttyPalette(def: GhosttyThemeDef): Palette {
   const dark = hexLuminance(def.background) <= 0.5
@@ -252,6 +307,7 @@ function ghosttyPalette(def: GhosttyThemeDef): Palette {
     muted,
     userBarBackground: mixHex(def.background, accent, dark ? 0.32 : 0.28),
     userBarForeground: def.foreground,
+    syntax: def.syntax,
     diff: {
       add: chalk.hex(success),
       del: chalk.hex(danger),
@@ -264,7 +320,7 @@ function ghosttyPalette(def: GhosttyThemeDef): Palette {
       link: chalk.hex(accent).underline,
       image: chalk.hex(accent),
     },
-    highlight: highlightFromTokens({ accent, warning, success, danger, info, approval, muted }),
+    highlight: highlightFromSyntax(def.syntax, chalk.hex(success), chalk.hex(danger)),
   }
 }
 
@@ -272,6 +328,11 @@ const GHOSTTY_PALETTES = {} as Record<GhosttyThemeId, Palette>
 for (const def of GHOSTTY_THEMES) GHOSTTY_PALETTES[def.id] = ghosttyPalette(def)
 
 const PALETTES: Readonly<Record<ThemeName, Palette>> = { light: LIGHT, dark: DARK, ...GHOSTTY_PALETTES }
+
+/** Palette lookup by resolved theme name; exported for tests. */
+export function paletteFor(name: ThemeName): Palette {
+  return PALETTES[name]!
+}
 
 let active: ThemeName = 'light'
 
