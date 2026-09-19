@@ -75,3 +75,72 @@ describe('TuiStore replay batching', () => {
     expect(await approval).toBe('reject')
   })
 })
+
+describe('TuiStore llm retry events', () => {
+  const RETRY = (attempt: number): SessionEvent =>
+    ev('llm/retry', {
+      retryId: 'r1', turn: 1, step: 1, provider: 'p', mode: 'normal',
+      policyKey: 'default', retry: attempt, maxRetries: 5, delayMs: 8000,
+      failure: { message: 'Request timed out', code: 'timeout', status: 504 },
+    }, 10 + attempt)
+
+  const RETRY_STARTED = ev('llm/retry-started', { retryId: 'r1', turn: 1, step: 1, retry: 1 }, 20)
+
+  it('a live retry surfaces a notice and the transient wait state', () => {
+    const store = new TuiStore('s1', 'model')
+    store.onEvent(TURN_START)
+    store.onEvent(RETRY(2))
+
+    const snapshot = store.getSnapshot()
+    expect(snapshot.retryWait).toEqual({ attempt: 2, maxRetries: 5, delayMs: 8000, reason: 'timeout' })
+    expect(snapshot.items.at(-1)).toMatchObject({ kind: 'notice', tone: 'warn' })
+    expect((snapshot.items.at(-1) as { text: string }).text).toContain('第 2/5 次重试')
+  })
+
+  it('retry-started clears the wait while the notice history remains', () => {
+    const store = new TuiStore('s1', 'model')
+    store.onEvent(TURN_START)
+    store.onEvent(RETRY(1))
+    store.onEvent(RETRY_STARTED)
+
+    expect(store.getSnapshot().retryWait).toBeNull()
+    expect(store.getSnapshot().items.some(item => item.kind === 'notice')).toBe(true)
+  })
+
+  it('the unbounded (always) policy omits maxRetries', () => {
+    const store = new TuiStore('s1', 'model')
+    store.onEvent(TURN_START)
+    store.onEvent(ev('llm/retry', {
+      retryId: 'r1', turn: 1, step: 1, provider: 'p', mode: 'always',
+      policyKey: 'default', retry: 3, delayMs: 1000,
+      failure: { message: '429', code: 'rate-limit' },
+    }, 11))
+
+    expect(store.getSnapshot().retryWait).toEqual({
+      attempt: 3, maxRetries: null, delayMs: 1000, reason: 'rate-limit',
+    })
+  })
+
+  it('turn boundaries and reset clear the wait', () => {
+    const store = new TuiStore('s1', 'model')
+    store.onEvent(TURN_START)
+    store.onEvent(RETRY(1))
+    store.onEvent(TURN_END)
+    expect(store.getSnapshot().retryWait).toBeNull()
+
+    store.onEvent(RETRY(1))
+    store.reset('s2', 'model', [])
+    expect(store.getSnapshot().retryWait).toBeNull()
+  })
+
+  it('replay leaves no retry notices and no stale wait', () => {
+    const store = new TuiStore('s1', 'model')
+    store.replay([TURN_START, RETRY(1), RETRY_STARTED, TURN_END])
+    store.finishReplay()
+
+    const snapshot = store.getSnapshot()
+    expect(snapshot.retryWait).toBeNull()
+    expect(snapshot.items.filter(item => item.kind === 'notice')).toEqual([])
+  })
+})
+

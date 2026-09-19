@@ -37,6 +37,19 @@ export function readClipboardText(): Promise<string> {
   })
 }
 
+/** Write text to the system clipboard (pbcopy); rejects on failure. */
+export function writeClipboardText(text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('pbcopy', [], { stdio: ['pipe', 'ignore', 'ignore'] })
+    child.on('error', reject)
+    child.on('close', code => {
+      if (code === 0) resolve()
+      else reject(new Error(`pbcopy 退出码 ${code ?? '未知'}`))
+    })
+    child.stdin.end(text, 'utf8')
+  })
+}
+
 /** Write one clipboard data class (AppleScript «class …») to a file. */
 function writeClipboardClass(classExpr: string, path: string): Promise<void> {
   const script =

@@ -19,6 +19,7 @@ export const builtinCommands: readonly MenuEntry[] = [
   { name: 'config', description: '查看 / 修改设置（权限、更新、通知、自动压缩）', kind: 'builtin' },
   { name: 'theme', description: '切换配色主题：自动 / 浅色 / 深色 / Ghostty 精选', kind: 'builtin' },
   { name: 'export', description: '导出当前会话为 Markdown', kind: 'builtin' },
+  { name: 'copy', description: '复制最后一条回复（Markdown 原文）到剪贴板', kind: 'builtin' },
   { name: 'edit', description: '用 $EDITOR 编写长消息', kind: 'builtin' },
   { name: 'image', description: '附加图片：<路径>… 或直接拖入终端；空参查看明细', kind: 'builtin' },
   { name: 'init', description: '在当前目录生成 AGENTS.md 骨架（已存在则不覆盖）', kind: 'builtin' },

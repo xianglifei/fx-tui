@@ -15,6 +15,9 @@
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+// Declaration-merge carrier: importing these types registers the `llm/retry`
+// and `llm/retry-started` session events this reducer consumes.
+import type {} from '@deepseek-ai/dsh-llm-retry'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
@@ -93,6 +96,20 @@ export interface QueuedMessage {
 export type Phase = 'idle' | 'thinking' | 'streaming' | 'tool'
 
 /**
+ * A live LLM request retry wait, surfaced from dsh-llm-retry's durable
+ * `llm/retry` event: without it a backoff window is indistinguishable from a
+ * hang. `maxRetries`/`delayMs` are null under the unbounded policy / before
+ * the wait is scheduled.
+ */
+export interface RetryWait {
+  readonly attempt: number
+  readonly maxRetries: number | null
+  readonly delayMs: number | null
+  /** Provider-neutral machine failure code (rate-limit, timeout, …). */
+  readonly reason: string
+}
+
+/**
  * Tool-approval stance, cycled with Shift+Tab:
  * 'ask' prompts for every approval request (allowlist memory still applies),
  * 'auto' allows every request without prompting.
@@ -125,6 +142,7 @@ export interface Snapshot {
   readonly sessionId: string
   readonly model: string
   readonly approvalMode: ApprovalMode
+  readonly retryWait: RetryWait | null
 }
 
 /** Bridge to the tools registry's presentation layer; optional. */
@@ -173,6 +191,7 @@ export class TuiStore {
   private echoedId: string | null = null
   private replaying = false
   private approvalMode: ApprovalMode = 'ask'
+  private retryWait: RetryWait | null = null
   private lastBanner: Omit<BannerItem, 'kind'> | null = null
   private snapshot!: Snapshot
   private readonly listeners = new Set<() => void>()
@@ -236,6 +255,7 @@ export class TuiStore {
       sessionId: this.sessionId,
       model: this.model,
       approvalMode: this.approvalMode,
+      retryWait: this.retryWait,
     }
   }
 
@@ -275,6 +295,7 @@ export class TuiStore {
       case 'turn/start': {
         this.phase = 'thinking'
         this.phaseDetail = ''
+        this.retryWait = null
         this.resetReasoning()
         this.turnToolCalls = 0
         break
@@ -403,10 +424,37 @@ export class TuiStore {
         this.todos = [...ev.data.todos]
         break
       }
+      case 'llm/retry': {
+        // Live only: historic retries are /trace material, not transcript rows
+        // (a resumed session would otherwise lead with stale failure lines).
+        if (this.replaying) break
+        const data = ev.data
+        this.retryWait = {
+          attempt: data.retry,
+          maxRetries: data.mode === 'normal' ? data.maxRetries : null,
+          delayMs: data.delayMs,
+          reason: data.failure.code,
+        }
+        const max = data.mode === 'normal' ? `/${data.maxRetries}` : ''
+        const delay = data.delayMs !== undefined ? `${Math.max(1, Math.round(data.delayMs / 1000))}s 后` : '等待退避'
+        this.items.push({
+          kind: 'notice',
+          tone: 'warn',
+          text: truncateLine(`⟳ 请求失败，第 ${data.retry}${max} 次重试（${delay}）：${data.failure.code} ${data.failure.message}`, 160),
+        })
+        break
+      }
+      case 'llm/retry-started': {
+        // The backoff wait completed; the next attempt is in flight. Whether
+        // it succeeded shows in what arrives next, not here.
+        this.retryWait = null
+        break
+      }
       case 'turn/end': {
         this.finalizeStream(ev.data.reason.kind === 'aborted')
         this.phase = 'idle'
         this.phaseDetail = ''
+        this.retryWait = null
         this.resetReasoning()
         this.streamStartMs = null
         // A dim one-line closure marker for tool-heavy turns; single-tool
@@ -483,6 +531,7 @@ export class TuiStore {
       })
     }
     this.pendingTools.clear()
+    this.retryWait = null
     this.phase = 'idle'
     this.phaseDetail = ''
     this.commit()
@@ -564,6 +613,7 @@ export class TuiStore {
     this.todos = []
     this.childAgentCount = 0
     this.turnToolCalls = 0
+    this.retryWait = null
     this.streamBuf = ''
     this.streamText = ''
     this.phase = 'idle'

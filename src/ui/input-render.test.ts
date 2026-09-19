@@ -63,6 +63,7 @@ async function renderInputBox(lines: readonly string[], row: number, col: number
       setMenu: noop,
       listCommands: () => [],
       runCommand: noop,
+      onShell: noop,
       onSubmit: noop,
       onRecallPending: () => null,
       onClipboardImage: noop,

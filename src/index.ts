@@ -59,6 +59,7 @@ import { formatToolArgs } from './store.js'
 import { detectTerminalBackground } from './terminal-bg.js'
 import { InputHistory } from './history.js'
 import { NOTIFY_MIN_TURN_MS, notifyTurnComplete } from './notify.js'
+import { launchShellPassthrough, parseShellBang } from './shell-bang.js'
 import { App } from './ui/App.js'
 import { draftCapture } from './ui/Input.js'
 import { activeThemeName, resolveTheme, setActiveTheme } from './ui/theme.js'
@@ -70,7 +71,7 @@ import { createCommandRunner } from './commands/index.js'
 import type { CommandCtx, SessionForkSeed } from './commands/types.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.26.0'
+export const FX_TUI_VERSION = '0.27.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
@@ -98,9 +99,11 @@ const USAGE = `fx-tui v${FX_TUI_VERSION} — DeepSeek Harness 的交互式终端
 
 按键：Enter 发送（运行中＝注入当前轮）· Ctrl+J 换行 · ↑↓ 历史/菜单 · Tab 补全或运行中排队 ·
 Alt+↑ 取回消息 · Ctrl+V 粘贴文本/图片 · Shift+Tab 权限模式 · Esc 中断 · Ctrl+O 工具详情 · Ctrl+C 清空/双击退出
+! <命令> 终端直通执行（!! 同义）：本地运行，结果以卡片显示，不进入对话上下文
 
 命令与技能：输入 / 弹出补全菜单（「命令」与「技能」双分组标题，随输入实时筛选）；
 选中技能插入 /技能名 手势，回车发送后模型自动加载该技能（也可在消息中直接写 /技能名）。
+/copy 复制最后一条回复（Markdown 原文）到剪贴板。
 `
 
 interface CliOptions {
@@ -669,6 +672,15 @@ function bottomFlush(): void {
     },
     runCommand(line: string): void {
       void runCommand(line)
+    },
+    /** `!` shell passthrough: run locally, show the outcome as a panel. The
+     * raw line (bang included) rides the input history so ↑ recalls it. */
+    onShell(line: string): void {
+      debugLog('shell', line)
+      const command = parseShellBang(line)?.command ?? ''
+      if (command === '') return
+      inputHistory.push(line)
+      void launchShellPassthrough(command, store)
     },
     /** Terminal drop: the input box extracted existing image paths from a
      * pasted drop chunk; attach them like /image would. */

@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
 import { Box, Text, useStdout } from 'ink'
 import stringWidth from 'string-width'
-import type { Phase } from '../store.js'
+import type { Phase, RetryWait } from '../store.js'
 import { formatCount } from '../text.js'
 import { theme } from './theme.js'
 
@@ -24,7 +24,7 @@ const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '
  * packed flush-right, so every unaccounted cell pushed past the edge clips
  * the tail (the lost final character of `推理 high`). Counting them as two
  * keeps the degradation ahead of the real render on any terminal. */
-const AMBIGUOUS_GLYPHS = new Set(['●', '·', '↑', '↓', '×'])
+const AMBIGUOUS_GLYPHS = new Set(['●', '·', '↑', '↓', '×', '⟳'])
 
 /** Terminal cells `text` occupies in the worst case. */
 function displayWidth(text: string): number {
@@ -45,6 +45,8 @@ export interface StatusBarProps {
   childAgents: number
   /** Reasoning effort carried by the latest request ('' when none/default). */
   effortLabel: string
+  /** Live LLM retry wait; null when the current request is not backing off. */
+  retryWait: RetryWait | null
 }
 
 export function StatusBar(props: StatusBarProps): ReactElement {
@@ -99,7 +101,9 @@ export function StatusBar(props: StatusBarProps): ReactElement {
 
   // The spinner glyph renders before the left text but was never budgeted —
   // on ambiguous-wide terminals that is one more unaccounted cell at the
-  // right edge. Budget it together with the left side.
+  // right edge. Budget it together with the left side. The retry segment
+  // rides the same degradation chain: it drops the reasoning suffix, then
+  // the detail, before it is allowed to break the line.
   const spinnerCells = displayWidth(active ? frame : '●')
   let left = ` ${label}`
   if (props.childAgents > 0) left += ` · 🌱×${props.childAgents}`
@@ -107,10 +111,12 @@ export function StatusBar(props: StatusBarProps): ReactElement {
   const withReasoning = props.phase === 'thinking' && props.reasoningChars > 0
     ? `${withDetail} · 已思考 ${formatCount(props.reasoningChars)} 字`
     : withDetail
+  const retrySegment = props.retryWait !== null ? ` · ${retryText(props.retryWait)}` : ''
+  const retryCells = displayWidth(retrySegment)
   const budget = Math.max(12, width - displayWidth(visible.map(part => part.text).join(' · ')) - 4)
-  if (displayWidth(withReasoning) + spinnerCells <= budget) {
+  if (displayWidth(withReasoning) + retryCells + spinnerCells <= budget) {
     left = withReasoning
-  } else if (displayWidth(withDetail) + spinnerCells <= budget) {
+  } else if (displayWidth(withDetail) + retryCells + spinnerCells <= budget) {
     left = withDetail
   }
   // else: bare label already fits the guaranteed minimum budget.
@@ -119,6 +125,7 @@ export function StatusBar(props: StatusBarProps): ReactElement {
     <Box>
       <Text color={active ? theme.accent : theme.success}>{active ? frame : '●'}</Text>
       <Text>{left}</Text>
+      {retrySegment !== '' && <Text color={theme.warning}>{retrySegment}</Text>}
       <Box flexGrow={1} />
       {visible.map((part, index) => (
         <Text key={index} dimColor={part.color === undefined} color={part.color}>
@@ -127,6 +134,15 @@ export function StatusBar(props: StatusBarProps): ReactElement {
       ))}
     </Box>
   )
+}
+
+/** Live retry segment like `⟳ 重试 2/5 · 8s（rate-limit）`; rendered in the
+ * warning tone — during a backoff window this line is the only honest answer
+ * to "is it hung?". */
+function retryText(wait: RetryWait): string {
+  const max = wait.maxRetries !== null ? `/${wait.maxRetries}` : ''
+  const delay = wait.delayMs !== null ? ` · ${Math.max(1, Math.round(wait.delayMs / 1000))}s` : ''
+  return `⟳ 重试 ${wait.attempt}${max}${delay}（${wait.reason}）`
 }
 
 /** Context water-level text like `上下文 45% (58k/128k)`; empty before any measurement. */

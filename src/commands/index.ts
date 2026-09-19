@@ -7,6 +7,7 @@ import type { SkillCatalog } from './menu.js'
 import { runBalance, runLogin, runLogout, runProvider } from './account.js'
 import { runBtw } from './btw.js'
 import { runConfig } from './config.js'
+import { runCopy } from './copy.js'
 import { exportSession } from './export.js'
 import { runContext, runCost, runDoctor, runHelp, runInit, runRestart, runStatus } from './info.js'
 import { runImage } from './image.js'
@@ -75,6 +76,9 @@ export function createCommandRunner(c: CommandCtx, catalog: SkillCatalog): (line
           return
         case 'export':
           await exportSession(c)
+          return
+        case 'copy':
+          await runCopy(c)
           return
         case 'edit':
           await c.openExternalEditor()

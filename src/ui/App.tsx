@@ -37,6 +37,8 @@ import { theme } from './theme.js'
 export interface AppActions {
   onSubmit(text: string, opts?: SubmitOptions): void
   runCommand(line: string): void
+  /** `!`-prefixed shell passthrough line (raw, bang included). */
+  onShell(line: string): void
   /** Attaches image paths extracted from a terminal file-drop. */
   onDroppedFiles(paths: readonly string[]): void
   /** Attaches a clipboard image (PNG bytes + display name). */
@@ -241,6 +243,7 @@ export function App(props: AppProps): ReactElement {
           contextWindow={snap.contextWindow}
           childAgents={snap.childAgents}
           effortLabel={snap.effortLabel}
+          retryWait={snap.retryWait}
         />
         <InputBox
           store={props.store}
@@ -257,6 +260,7 @@ export function App(props: AppProps): ReactElement {
           listCommands={props.listCommands}
           runCommand={props.actions.runCommand}
           onSubmit={props.actions.onSubmit}
+          onShell={props.actions.onShell}
           onRecallPending={props.actions.onRecallPending}
           onClipboardImage={props.actions.onClipboardImage}
           onDropFiles={props.actions.onDroppedFiles}

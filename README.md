@@ -42,7 +42,8 @@ fx --resume <id>                    # 恢复会话
 | `Ctrl+C` | 清空输入；空输入时再按一次退出 |
 | `y` `s` `a` `n` | 审批：一次 / 本会话 / 总是（记住）/ 拒绝 |
 | 数字键 | 问题选项选择 |
-| `/help` `/status` `/sessions` `/rename` `/model` `/effort` `/btw` `/context` `/doctor` `/config` `/theme` `/export` `/edit` `/image <路径…>` `/update` `/exit` | 内置命令（`/` 查看全部） |
+| `!命令` | **shell 直通**：本地执行并在卡片显示结果，不进入对话；首词补命令、其余补路径（Tab 补全，Enter 执行） |
+| `/help` `/status` `/sessions` `/rename` `/model` `/effort` `/btw` `/context` `/doctor` `/config` `/theme` `/export` `/copy` `/edit` `/image <路径…>` `/update` `/exit` | 内置命令（`/` 查看全部） |
 
 ### 审批记忆
 
@@ -63,13 +64,17 @@ fx --resume <id>                    # 恢复会话
   内容超屏后自然滚动、横幅逐行滚入 scrollback。窄终端自动降级（先截断值、再隐藏 logo）
 - **滚动式聊天界面**：主屏保留终端 scrollback，历史可搜索、可复制
 - **流式 Markdown 渲染**：代码高亮（cli-highlight）、CJK 感知换行（wrap-ansi）
+- **复制回复**：`/copy` 把最后一条助手回复的 Markdown 原文复制到剪贴板
+  （流式进行中取当前已生成部分）
 - **多行输入框**：光标编辑、输入历史（↑/↓，**跨会话持久化**到
   `$DSH_HOME/fx-tui-input-history.json`，上限 500 条）、粘贴通道
   （bracketed paste）、CJK 宽度安全、**钉底显示**（Claude Code 式始终位于屏幕最后一行）
 - **状态栏**：阶段 spinner + 思考字数 + token 用量（含**缓存命中率**与
   **输出速度 tok/s**）+ **上下文水位**（`上下文 N%·已用/容量`，token-meter
   驱动，**≥80% 琥珀、≥95% 红色告警**并各警告一次）+ **推理等级**（真实请求头
-  驱动）+ 窄终端自动降级（先丢推理等级、再丢用量，水位永远保留）
+  驱动）+ **LLM 重试可视化**（请求失败退避期间实时显示 `⟳ 重试 N/M · Xs
+  （原因码）`，不再分不清卡死与重试）+ 窄终端自动降级（先丢推理等级、
+  再丢用量，水位永远保留）
 - **长任务完成通知**：超过 10 秒的回合结束时提醒（Esc 主动中断的不提醒）——
   默认终端铃声（BEL），`/config notify <off|bell|system>` 可改 macOS 系统通知
   （osascript 通知中心弹窗 + 提示音）或关闭；主动中断的回合不提醒
@@ -113,6 +118,11 @@ fx --resume <id>                    # 恢复会话
 
 ### 输入效率
 
+- **shell 直通**：输入 `!命令`（如 `!npm test`）在本地 shell 直接执行，
+  不惊动模型、不写会话日志，结果以卡片显示（退出码 · 耗时 · 输出头尾
+  截断，超 10 分钟杀进程树）；`!!` 同义。补全：首词补 PATH 命令名
+  （含 `node_modules/.bin`），其余词补真实文件路径（`~` 展开、目录尾
+  斜杠、含空格自动引号）；Tab 补全、Enter 执行，命令行进 ↑ 历史
 - **Slash 命令与技能补全菜单**：`/` 弹出菜单，「命令」「技能」双分组显式标题
   （命令 = 内置 + dsh 命令注册表自动并入：/compact、/feedback、/goal、
   /permission…；技能 = dsh 技能注册表：项目 `.dsh/skills`、`.agents/skills`

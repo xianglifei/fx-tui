@@ -28,6 +28,15 @@ import type { PendingImage, TuiStore } from '../store.js'
 import { readClipboardImage, readClipboardText } from '../clipboard.js'
 import { isExistingImagePath, parsePathChunk } from '../path-drops.js'
 import { OSC11_REMNANT_RE } from '../terminal-bg.js'
+import { parseShellBang } from '../shell-bang.js'
+import {
+  completeShellCommand,
+  completeShellPath,
+  isPathLikeWord,
+  listPathCommands,
+  quoteShellWord,
+  shellWordAt,
+} from '../shell-complete.js'
 import { fuzzyMatchPaths, listWorkspaceFiles } from '../workspace-files.js'
 import { truncateLine } from './estimate.js'
 import { textRows, wrapTextRows } from './ink-text.js'
@@ -71,6 +80,8 @@ export interface InputBoxProps {
   setMenu: Dispatch<SetStateAction<Menu | null>>
   listCommands(): readonly MenuEntry[]
   runCommand(line: string): void
+  /** `!`-prefixed shell passthrough line (raw, bang included). */
+  onShell(line: string): void
   /** Attaches extracted drop paths to the next message (terminal file-drop). */
   onDropFiles?: (paths: readonly string[]) => void
   onSubmit(text: string, opts?: SubmitOptions): void
@@ -112,7 +123,7 @@ export type MenuRow =
   }
 
 export interface Menu {
-  kind: 'commands' | 'files'
+  kind: 'commands' | 'files' | 'shell'
   query: string
   /** Rendered lines in order, headers included — the window slides over rows. */
   rows: readonly MenuRow[]
@@ -123,6 +134,9 @@ export interface Menu {
   /** Commands menu only: ←→ toggles the description between the 40-column
    * teaser and the full text (still single-row, truncated to the pane). */
   expanded: boolean
+  /** Shell menu only: where the completed word starts (code-point index into
+   * the draft's single line) and whether it sits in command position. */
+  shell?: { wordStart: number; command: boolean }
 }
 
 /** Visible entry rows the menu always occupies; a longer filtered list scrolls
@@ -136,7 +150,7 @@ const MAX_FILE_MATCHES = 60
 const MENU_DESC_COLUMNS = 40
 
 export function InputBox(props: InputBoxProps): ReactElement {
-  const { store, history, frozen, questionFreeText, showFreeTextHint, pendingImages, ed, setEd, editorVisibleRows, menu, setMenu, listCommands, runCommand, onSubmit, onRecallPending, onClipboardImage, onDropFiles, onInterrupt, onExit } = props
+  const { store, history, frozen, questionFreeText, showFreeTextHint, pendingImages, ed, setEd, editorVisibleRows, menu, setMenu, listCommands, runCommand, onShell, onSubmit, onRecallPending, onClipboardImage, onDropFiles, onInterrupt, onExit } = props
   const [histIdx, setHistIdx] = useState(-1)
   const [draft, setDraft] = useState<string | null>(null)
   const menuIndexRef = useRef(0)
@@ -172,6 +186,53 @@ export function InputBox(props: InputBoxProps): ReactElement {
     const text = ed.lines.join('\n')
     const line = ed.lines[ed.row] ?? ''
     const before = Array.from(line).slice(0, ed.col).join('')
+
+    // Shell menu: a `!` passthrough draft completes PATH commands in command
+    // position, real filesystem paths everywhere else. Single-line drafts
+    // only — shell syntax past line 0 is left to the shell.
+    if (ed.lines.length === 1 && text.startsWith('!')) {
+      const word = shellWordAt(text, ed.col)
+      if (word === undefined || word.query === '') {
+        setMenu(null)
+        return
+      }
+      if (dismissedQueryRef.current === `!${word.query}`) {
+        setMenu(null)
+        return
+      }
+      const useCommands = word.command && !isPathLikeWord(word.query)
+      let cancelled = false
+      void (async () => {
+        const rows: readonly MenuRow[] = useCommands
+          ? completeShellCommand(word.query, await listPathCommands()).map(name => ({
+              type: 'entry' as const, label: name, description: '命令', skill: false,
+            }))
+          : (await completeShellPath(word.query, process.cwd())).map(match => ({
+              type: 'entry' as const,
+              label: match.label,
+              description: match.directory ? '目录' : '',
+              skill: false,
+            }))
+        if (cancelled) return
+        if (rows.length === 0) {
+          setMenu(null)
+          return
+        }
+        const index = clampToEntryRow(rows, Math.min(menuIndexRef.current, rows.length - 1))
+        const scroll = clampScroll(menuScrollRef.current, index, rows.length)
+        menuScrollRef.current = scroll
+        setMenu({
+          kind: 'shell',
+          query: word.query,
+          rows,
+          index,
+          scroll,
+          expanded: false,
+          shell: { wordStart: word.start, command: word.command },
+        })
+      })()
+      return () => { cancelled = true }
+    }
 
     // Slash menu: the whole input is one unfinished command or skill word.
     if (text.startsWith('/') && !text.includes(' ') && !text.includes('\n')) {
@@ -300,7 +361,10 @@ export function InputBox(props: InputBoxProps): ReactElement {
 
     if (key.escape) {
       if (menu !== null) {
-        dismissedQueryRef.current = menu.kind === 'commands' ? `/${menu.query}` : `@${menu.query}`
+        dismissedQueryRef.current =
+          menu.kind === 'commands' ? `/${menu.query}`
+          : menu.kind === 'shell' ? `!${menu.query}`
+          : `@${menu.query}`
         setMenu(null)
         return
       }
@@ -351,6 +415,17 @@ export function InputBox(props: InputBoxProps): ReactElement {
       if (key.return) {
         const row = menu.rows[menu.index]!
         if (row.type !== 'entry') return
+        if (menu.kind === 'shell') {
+          // Enter runs the draft as typed — Tab is the completion key here
+          // (mcode's applyOnEnter:false). Close first so the menu pane never
+          // shares a frame with the run's panel or notice.
+          dismissedQueryRef.current = null
+          setMenu(null)
+          menuIndexRef.current = 0
+          menuScrollRef.current = 0
+          submit()
+          return
+        }
         if (menu.kind === 'files' || row.skill) {
           // Skills (and any file entry) complete into the draft — the user
           // keeps typing the task text around the /name gesture.
@@ -552,6 +627,22 @@ export function InputBox(props: InputBoxProps): ReactElement {
       setEd({ lines: [`${label} `], row: 0, col: label.length + 1 })
       return
     }
+    if (menu.kind === 'shell') {
+      // Replace the partial word with the candidate (quoted when the shell
+      // would otherwise split it). A directory keeps no trailing space — the
+      // user continues into it; anything else gets one for the next argument.
+      const chars = Array.from(ed.lines[0] ?? '')
+      const inserted = quoteShellWord(label)
+      const tail = chars.slice(ed.col).join('')
+      const needsGap = !label.endsWith('/') && (tail === '' || !/^\s/u.test(tail))
+      const head = chars.slice(0, menu.shell?.wordStart ?? chars.length).join('') + inserted
+      setEd({
+        lines: [head + (needsGap ? ' ' : '') + tail],
+        row: 0,
+        col: Array.from(head).length + (needsGap ? 1 : 0),
+      })
+      return
+    }
     setEd(current => {
       const chars = Array.from(current.lines[current.row] ?? [])
       const line = chars.join('')
@@ -641,6 +732,21 @@ export function InputBox(props: InputBoxProps): ReactElement {
   }
 
   function submitText(text: string): void {
+    // `!` passthrough outranks slash dispatch: the line never reaches the
+    // command registry or the model. An empty command keeps the draft so the
+    // user can finish typing it.
+    const bang = parseShellBang(text)
+    if (bang !== undefined) {
+      if (bang.command === '') {
+        store.addNotice('用法：! <命令> — 在本地 shell 执行，结果以卡片显示（!! 同义）', 'warn')
+        return
+      }
+      onShell(text)
+      setEd({ lines: [''], row: 0, col: 0 })
+      setHistIdx(-1)
+      setDraft(null)
+      return
+    }
     if (text.startsWith('/') && !text.includes('\n')) {
       runCommand(text)
     } else {
@@ -1071,8 +1177,9 @@ function menuHint(menu: Menu): string {
   const position = entries > MENU_SLOTS
     ? `第 ${menu.rows.slice(0, menu.index + 1).filter(row => row.type === 'entry').length}/${entries} 项 · `
     : ''
+  const enter = menu.kind === 'commands' ? '执行/插入' : menu.kind === 'shell' ? '执行' : '补全'
   const expand = menu.kind === 'commands' ? ' · ←→ 描述' : ''
-  return `${position}↑↓ 选择 · Tab 补全 · Enter ${menu.kind === 'commands' ? '执行/插入' : '补全'}${expand} · Esc 关闭`
+  return `${position}↑↓ 选择 · Tab 补全 · Enter ${enter}${expand} · Esc 关闭`
 }
 
 /** Names of the queued images in the attachment tray; shared by the render and
