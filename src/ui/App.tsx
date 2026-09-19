@@ -585,7 +585,7 @@ function QuestionView(props: { store: TuiStore; question: ActiveQuestion; width:
             key={option.label}
             color={isApprove ? theme.success : selected ? theme.info : undefined}
             bold={selected || isApprove}
-            inverse={isCursor}
+            backgroundColor={isCursor ? theme.selectedBg : undefined}
           >
             {questionOptionRow(option, visibleIndex, { selected, isApprove, cursor: isCursor })}
           </Text>

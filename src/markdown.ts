@@ -53,7 +53,7 @@ function renderBlock(token: Token, out: string[], width: number): void {
     }
     case 'code': {
       const t = token as Tokens.Code
-      const rule = chalk.dim('─'.repeat(Math.max(8, Math.min(width, 72))))
+      const rule = theme.md.codeBlockBorder('─'.repeat(Math.max(8, Math.min(width, 72))))
       out.push(rule)
       const code = t.lang !== undefined && t.lang !== '' && t.lang !== 'text'
         ? safeHighlight(t.text, t.lang)
@@ -76,7 +76,7 @@ function renderBlock(token: Token, out: string[], width: number): void {
             : '• '
         const body: string[] = []
         for (const child of item.tokens) renderBlock(child, body, innerWidth)
-        out.push(marker + (body[0] ?? ''))
+        out.push(theme.md.listBullet(marker) + (body[0] ?? ''))
         for (const line of body.slice(1)) out.push(`  ${line}`)
       })
       pushBlank(out)
@@ -86,12 +86,12 @@ function renderBlock(token: Token, out: string[], width: number): void {
       const t = token as Tokens.Blockquote
       const inner: string[] = []
       for (const child of t.tokens) renderBlock(child, inner, Math.max(12, width - 2))
-      for (const line of inner) out.push(`${chalk.dim('│ ')}${chalk.dim(line)}`)
+      for (const line of inner) out.push(`${theme.md.quoteBorder('│ ')}${theme.md.quote(line)}`)
       pushBlank(out)
       break
     }
     case 'hr': {
-      out.push(chalk.dim('─'.repeat(width)))
+      out.push(theme.md.hr('─'.repeat(width)))
       pushBlank(out)
       break
     }
@@ -144,10 +144,10 @@ function renderTable(table: Tokens.Table, out: string[], width: number): void {
       const cell = cellPad(stripAnsi(cells[c] ?? ''), widths[c] ?? 8)
       parts.push(header ? chalk.bold(cell) : cell)
     }
-    out.push(parts.join(chalk.dim(' │ ')))
+    out.push(parts.join(theme.md.hr(' │ ')))
   }
   renderRow(headers, true)
-  out.push(chalk.dim(widths.map(w => '─'.repeat(w)).join('─┼─')))
+  out.push(theme.md.hr(widths.map(w => '─'.repeat(w)).join('─┼─')))
   for (const row of rows) renderRow(row, false)
 }
 
@@ -205,14 +205,14 @@ function inline(tokens: Token[] | undefined): string {
         const lt = t as Tokens.Link
         const label = inline(lt.tokens)
         s += theme.md.link(label !== '' ? label : lt.href)
-        if (lt.href !== undefined && label !== '' && lt.href !== label) s += chalk.dim(` (${lt.href})`)
+        if (lt.href !== undefined && label !== '' && lt.href !== label) s += theme.md.linkUrl(` (${lt.href})`)
         break
       }
       case 'del': s += chalk.strikethrough(inline((t as Tokens.Del).tokens)); break
       case 'br': s += '\n'; break
       case 'escape': s += (t as Tokens.Escape).text; break
       case 'image': s += theme.md.image(`[图片：${(t as Tokens.Image).text ?? ''}]`); break
-      case 'html': s += chalk.dim((t as Tokens.HTML).text ?? ''); break
+      case 'html': s += theme.dim((t as Tokens.HTML).text ?? ''); break
       default: s += 'text' in t ? String((t as { text?: string }).text ?? '') : ''
     }
   }

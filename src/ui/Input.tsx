@@ -864,7 +864,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
         // content height is already constant here. Every row is truncated to
         // the pane's inner width — a wrapped row would corrupt the fixed slot
         // budget the filler was computed from.
-        <Box flexDirection="column" borderStyle="round" borderColor={theme.muted} paddingX={1}>
+        <Box flexDirection="column" borderStyle="round" borderColor={theme.borderMuted} paddingX={1}>
           {Array.from({ length: MENU_SLOTS }, (_, line) => {
             const row = menu.rows[menu.scroll + line]
             if (row === undefined) return <Text key={`blank-${line}`}>{' '}</Text>
@@ -872,7 +872,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
               return <Text key={`header-${line}`} dimColor>{truncateLine(`— ${row.label} —`, regionColumns - 4)}</Text>
             }
             return (
-              <Text key={row.label} inverse={menu.scroll + line === menu.index}>
+              <Text key={row.label} backgroundColor={menu.scroll + line === menu.index ? theme.selectedBg : undefined}>
                 <MenuEntryText row={row} expanded={menu.expanded} innerWidth={regionColumns - 4} />
               </Text>
             )
@@ -880,7 +880,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
           <Text dimColor>{truncateLine(menuHint(menu), regionColumns - 4)}</Text>
         </Box>
       )}
-      <Box flexDirection="column" borderStyle="round" borderColor={frozen ? theme.muted : theme.accent} paddingX={1}>
+      <Box flexDirection="column" borderStyle="round" borderColor={frozen ? theme.borderMuted : theme.borderAccent} paddingX={1}>
         {showFreeTextHint && <Text dimColor>{FREE_TEXT_HINT}</Text>}
         {pendingImages.length > 0 && (
           <>

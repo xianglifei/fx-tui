@@ -3,6 +3,44 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.31.0] - 2026-09-19
+
+### 功能：调色板两域架构——界面域钉品牌、内容域随主题；token 扩充补齐语义层级
+
+**动机**：14 个 Ghostty 主题此前用「ANSI 槽位约定映射」染色整个 UI
+（cyan→accent、yellow→warning……），切主题等于换一件完全不同的衣服：
+Gruvbox 下 accent 是绿的、Rose Pine Moon 下是蓝的，「品牌青色 ~181°」
+只在内置深色里成立，主题之间没有家族感；同时 token 只有 9 个，次级文
+字、代码围栏、引用线、表格分隔线全靠主题无关的 `chalk.dim` 硬凑，选中
+行靠 `inverse` 反显。对照 MiniMax Code（pi）的 51-token 全量 schema 与
+muted/dim、border 三级、md 十色分组，fx-tui 缺的是**语义层级**而非数量。
+
+**机制（两域拆分）**：`Palette` 按域重组，Ghostty 主题不再自行派生界面
+色——
+
+- **界面域（品牌钉死）**：accent/warning/success/danger/info/approval/
+  muted 七个角色 + 新增 borderAccent（输入框活动边框）/borderMuted（冻
+  结边框、补全面板）/dim（沉淀级文字与杂项）/selectedBg（选中行背景）
+  全部来自品牌 token 组——深底用既有粉彩 hex 组，亮底沿用命名 ANSI 组；
+  切主题时 UI 骨架色相稳定。仅 userBar/selectedBg 两个背景混色 token
+  以主题底色为基底（深底混亮青 #67e8f9、亮底混深青 #0e7490），与终端
+  保持和谐；
+- **内容域（随主题）**：syntax（v0.30.0 起逐字官方语法层）/diff/md 跟
+  随所选主题，md 组按 pi 的 md 十色扩齐：新增 codeBlockBorder（围栏
+  线）、quote/quoteBorder（引用）、hr（分隔线与表格线）、listBullet
+  （列表符号）、linkUrl（链接后括号 URL）；markdown.ts 六处 `chalk.dim`
+  全部收编进主题 token。
+
+**消费端**：问题卡/选择器光标行与补全菜单选中行由 `inverse` 反显改为
+`backgroundColor={theme.selectedBg}`（反显在带色前景上会产生刺眼反转，
+背景色调温和且与 pi 一致）；accent 与 info 的角色边界（装饰性身份 vs
+中性提示）写入 token 注释。用户消息条颜色不变。
+
+**测试 310 → 313**：界面域品牌钉住断言（同底色的 Ghostty 主题七个界面
+token 与内置主题逐一相等）、背景混色 token 仍随主题（userBarForeground
+= 主题前景、selectedBg 对底色有抬升）、扩充 token 全主题存在。主题/
+构建全绿。
+
 ## [0.30.0] - 2026-09-19
 
 ### 功能：代码块语法高亮独立成组——每个主题用自己官方编辑器配色

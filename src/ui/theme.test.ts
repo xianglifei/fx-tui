@@ -57,6 +57,49 @@ describe('palette syntax groups', () => {
   })
 })
 
+describe('palette domains', () => {
+  const darkGhostty = GHOSTTY_THEME_IDS.filter(id => hexLuminance(ghosttyThemeDef(id).background) <= 0.5)
+  const lightGhostty = GHOSTTY_THEME_IDS.filter(id => hexLuminance(ghosttyThemeDef(id).background) > 0.5)
+
+  it('Ghostty palettes pin the interface domain to the brand, by tone', () => {
+    const darkBrand = paletteFor('dark')
+    const lightBrand = paletteFor('light')
+    for (const token of ['accent', 'warning', 'success', 'danger', 'info', 'approval', 'muted'] as const) {
+      for (const id of darkGhostty) {
+        expect(paletteFor(id)[token], `${id}.${token}`).toBe(darkBrand[token])
+      }
+      for (const id of lightGhostty) {
+        expect(paletteFor(id)[token], `${id}.${token}`).toBe(lightBrand[token])
+      }
+    }
+  })
+
+  it('background-tinted tokens still lean on the theme background', () => {
+    for (const id of GHOSTTY_THEME_IDS) {
+      const def = ghosttyThemeDef(id)
+      const pal = paletteFor(id)
+      // The user bar and the selection are brand-hued mixes over the theme's
+      // own background, so they still harmonize with the terminal.
+      expect(pal.userBarBackground).not.toBe(paletteFor('dark').userBarBackground)
+      expect(pal.userBarForeground).toBe(def.foreground)
+      expect(HEX_RE.test(pal.selectedBg), `${id}.selectedBg = ${pal.selectedBg}`).toBe(true)
+      expect(contrastRatio(pal.selectedBg, def.background), `${id} selection lift`).toBeGreaterThan(1.1)
+    }
+  })
+
+  it('every palette defines the expanded interface and markdown tokens', () => {
+    for (const name of ALL_THEME_NAMES) {
+      const pal = paletteFor(name)
+      expect(typeof pal.borderAccent).toBe('string')
+      expect(typeof pal.borderMuted).toBe('string')
+      expect(typeof pal.dim).toBe('function')
+      for (const style of ['heading', 'codespan', 'link', 'linkUrl', 'image', 'codeBlockBorder', 'quote', 'quoteBorder', 'hr', 'listBullet'] as const) {
+        expect(typeof pal.md[style], `${name}.md.${style}`).toBe('function')
+      }
+    }
+  })
+})
+
 describe('hexLuminance', () => {
   it('pins black to 0 and white to 1', () => {
     expect(hexLuminance('#000000')).toBe(0)
