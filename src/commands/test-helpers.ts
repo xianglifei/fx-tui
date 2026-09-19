@@ -183,6 +183,7 @@ export function makeCtx(
     saveDefaultSelection: async (sel: ModelSelection): Promise<void> => {
       log.savedSelections.push(sel)
     },
+    syncStatusLine: () => {},
     ...overrides,
   }
 

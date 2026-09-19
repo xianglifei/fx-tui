@@ -244,6 +244,11 @@ export function App(props: AppProps): ReactElement {
           childAgents={snap.childAgents}
           effortLabel={snap.effortLabel}
           retryWait={snap.retryWait}
+          items={snap.statusLineItems}
+          model={snap.model}
+          gitBranch={snap.gitBranch}
+          customStatus={snap.customStatus}
+          compacting={snap.compacting}
         />
         <InputBox
           store={props.store}

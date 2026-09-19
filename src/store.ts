@@ -27,6 +27,8 @@ import { ApprovalBridge } from './approval-bridge.js'
 import type { ApprovalChoice, ApprovalPrompt, BridgeHooks } from './approval-bridge.js'
 import { QuestionBridge } from './question-bridge.js'
 import type { ActiveQuestion } from './question-bridge.js'
+import { DEFAULT_STATUS_LINE } from './statusline.js'
+import type { StatusLineItemId } from './statusline.js'
 import { formatCount, formatElapsed, truncateLine } from './text.js'
 
 // -- Transcript items ---------------------------------------------------------
@@ -160,6 +162,10 @@ export interface Snapshot {
   readonly model: string
   readonly approvalMode: ApprovalMode
   readonly retryWait: RetryWait | null
+  readonly statusLineItems: readonly StatusLineItemId[]
+  readonly gitBranch: string
+  readonly customStatus: string | null
+  readonly compacting: boolean
 }
 
 /** Bridge to the tools registry's presentation layer; optional. */
@@ -212,6 +218,10 @@ export class TuiStore {
   private replaying = false
   private approvalMode: ApprovalMode = 'ask'
   private retryWait: RetryWait | null = null
+  private statusLineItems: readonly StatusLineItemId[] = [...DEFAULT_STATUS_LINE]
+  private gitBranch = ''
+  private customStatus: string | null = null
+  private compacting = false
   private lastBanner: Omit<BannerItem, 'kind'> | null = null
   private snapshot!: Snapshot
   private readonly listeners = new Set<() => void>()
@@ -277,6 +287,10 @@ export class TuiStore {
       model: this.model,
       approvalMode: this.approvalMode,
       retryWait: this.retryWait,
+      statusLineItems: this.statusLineItems,
+      gitBranch: this.gitBranch,
+      customStatus: this.customStatus,
+      compacting: this.compacting,
     }
   }
 
@@ -662,6 +676,9 @@ export class TuiStore {
     this.streamStartMs = null
     this.pressureWarnedLevel = 0
     this.echoedId = null
+    // Cached custom-command output belongs to the outgoing session; the
+    // watcher's session-switch refresh repopulates it.
+    this.customStatus = null
     this.replay(events)
     this.finishReplay()
   }
@@ -669,6 +686,35 @@ export class TuiStore {
   /** Update the status-bar model label (after a /model switch). */
   setModel(model: string): void {
     this.model = model
+    this.commit()
+  }
+
+  /** Apply a /statusline configuration change (startup seed included). */
+  setStatusLineItems(items: readonly StatusLineItemId[]): void {
+    this.statusLineItems = [...items]
+    this.commit()
+  }
+
+  /** Git-branch segment; '' hides it (not a repository / unreadable). */
+  setGitBranch(branch: string): void {
+    if (this.gitBranch === branch) return
+    this.gitBranch = branch
+    this.commit()
+  }
+
+  /** Custom-command segment; null hides it (no data yet, cleared on session
+   * switch, or empty stdout). */
+  setCustomStatus(text: string | null): void {
+    if (this.customStatus === text) return
+    this.customStatus = text
+    this.commit()
+  }
+
+  /** Auto-compaction in progress: a transient segment while history is being
+   * rewritten at idle — the one moment "still idle?" is ambiguous. */
+  setCompacting(value: boolean): void {
+    if (this.compacting === value) return
+    this.compacting = value
     this.commit()
   }
 

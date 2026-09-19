@@ -14,6 +14,7 @@ import { runImage } from './image.js'
 import { listModelChoices, runEffort } from './model.js'
 import { listSessionChoices, runClear, runFork, runNew, runRename, runResume, runRewind } from './session.js'
 import { runSkills } from './skills.js'
+import { runStatusline } from './statusline.js'
 import { runTheme } from './theme.js'
 import { runTrace, runTree } from './trace.js'
 import { runUpdate } from './update.js'
@@ -73,6 +74,9 @@ export function createCommandRunner(c: CommandCtx, catalog: SkillCatalog): (line
           return
         case 'theme':
           await runTheme(c, rest)
+          return
+        case 'statusline':
+          await runStatusline(c, rest)
           return
         case 'export':
           await exportSession(c)

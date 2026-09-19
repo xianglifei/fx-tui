@@ -3,6 +3,56 @@
 本项目的所有显著变更记录于此。版本格式遵循 [SemVer](https://semver.org/)，
 条目参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.32.0] - 2026-09-20
+
+### 功能：状态栏可配置化——条目目录、显示顺序与自定义命令（/statusline）
+
+**动机**：状态栏右侧此前是硬编码三段（上下文水位 · 会话用量 · 推理强
+度），想看的「当前模型」「git 分支」进不了状态栏，想藏的段落也藏不掉。
+对照 MiniMax Code（pi/mcode）的 status-line 设计（条目目录 + 顺序即显示
+顺序 + custom-command 外部命令扩展），fx-tui 取其配置模型、舍其面板机
+器（重排序、别名、机器协议、block 展示属上游规模），做一个贴合自身
+store/命令层模式的精简版。
+
+**机制**：
+
+- **条目目录（7 项）**：`context` / `usage` / `effort`（原三段，默认保
+  留——升级后行为不变）/ `model`（provider/model 路由）/ `git`（分支
+  名，**零依赖**直读 `.git/HEAD`，支持 worktree 指针文件与 detached
+  HEAD 短 sha）/ `compaction`（自动压缩进行中才显示的瞬时条目）/
+  `custom`（外部命令 stdout 首行，需另行配置命令）；
+- **配置与数据分离**：`settings.statusLine`（字符串数组，顺序即显示顺
+  序，从左到右）只存「显示什么」，快照新增 `statusLineItems` /
+  `gitBranch` / `customStatus` / `compacting` 四个数据字段；新的
+  `StatusLineWatcher` 拥有异步源——git 每 10 秒轮询、自定义命令在启动/
+  每轮结束/会话切换时触发（可选 `intervalSeconds` 周期刷新，≥10 秒，
+  上限 1 小时），失败或超时（5 秒）保留上一次成功输出，同一时刻至多一
+  个命令在跑（并发触发合并为一次收尾重跑，mcode 同款语义）；
+- **窄端退化**：条目带优先级（context 3 > usage/compaction 2 >
+  model/effort 1 > git/custom 0），终端太窄时从低优先级、靠右者先隐，
+  上下文水位仍是最后消失的那一段；不可用源（非 git 仓库、无用量记录、
+  压缩空闲）直接隐藏该段，不造假数据；
+- **左区不变**：spinner、阶段、🌱 子代理徽章、重试倒计时仍是运行心
+  跳，不参与配置。
+
+**/statusline 命令**：裸命令开多选卡（标题携带当前配置，空格/数字切换，
+回车保存为目录序）；直接形式 `/statusline git model context` 整表设置
+（未知条目报目录不落盘）、`off` 全隐、`default` 恢复默认；`custom` 子命
+令：`custom <shell 命令>` 设置（自动补启用 custom 条目）、
+`custom interval <秒>` 周期刷新、`custom off` 清除、空参看明细。配置落
+`$DSH_HOME/fx-tui-settings.json`（`statusLine` 显式保存时才写键，恢复默
+认即删键）。
+
+**对齐修复**：v0.31.0 漏升 `package.json`（停在 0.30.0），本版与
+`FX_TUI_VERSION` 一并对齐到 0.32.0。
+
+**测试 313 → 343**：条目解析（非数组回落默认、未知/重复丢弃）、git 分
+支读取（普通/.detached/worktree 指针/无仓库）、首行提取、区间钳制、分
+段构建（配置序渲染、不可用隐藏、压缩瞬时性、默认行为不变）、watcher
+（执行/失败保留旧值/会话切换清缓存/配置变更即时显隐）、命令层（直接形
+式、未知报错、off/default、多选卡保存与跳过、custom 三动作）、设置持
+久化往返与损坏文件回落。构建/主题/测试全绿。
+
 ## [0.31.0] - 2026-09-19
 
 ### 功能：调色板两域架构——界面域钉品牌、内容域随主题；token 扩充补齐语义层级

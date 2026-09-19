@@ -15,6 +15,8 @@ import { dirname, join } from 'node:path'
 import type { NotifyMode } from './notify.js'
 import { isNotifyMode } from './notify.js'
 import type { ApprovalMode } from './store.js'
+import { DEFAULT_STATUS_LINE, parseStatusLineItems } from './statusline.js'
+import type { StatusLineItemId } from './statusline.js'
 import type { ThemeSetting } from './ui/theme.js'
 import { isThemeSetting } from './ui/theme.js'
 
@@ -32,6 +34,13 @@ export const DEFAULT_NOTIFY: NotifyMode = 'bell'
 /** Auto-compaction stays opt-in: it rewrites history, so the user turns it on deliberately. */
 export const DEFAULT_AUTO_COMPACT = false
 
+/** The custom status command: run under the user's shell, first stdout line
+ * becomes the `custom` segment. Absent means the segment is unconfigured. */
+export interface StatusLineCommandConfig {
+  readonly command: string
+  readonly intervalSeconds?: number
+}
+
 interface SettingsFile {
   version: 1
   approvalMode: ApprovalMode
@@ -39,6 +48,8 @@ interface SettingsFile {
   theme?: ThemeSetting
   notify?: NotifyMode
   autoCompact?: boolean
+  statusLine?: readonly string[]
+  statusLineCommand?: { command: string; intervalSeconds?: number }
 }
 
 const FILE_VERSION = 1
@@ -55,6 +66,9 @@ export class FxSettings {
   private themeValue: ThemeSetting
   private notifyValue: NotifyMode
   private autoCompactValue: boolean
+  private statusLineValue: StatusLineItemId[]
+  private statusLineExplicit: boolean
+  private statusLineCommandValue: StatusLineCommandConfig | undefined
   private readonly filePath: string
 
   constructor(dshHome: string | undefined) {
@@ -66,6 +80,9 @@ export class FxSettings {
     this.themeValue = loaded.theme
     this.notifyValue = loaded.notify
     this.autoCompactValue = loaded.autoCompact
+    this.statusLineValue = loaded.statusLine
+    this.statusLineExplicit = loaded.statusLineExplicit
+    this.statusLineCommandValue = loaded.statusLineCommand
   }
 
   get approvalMode(): ApprovalMode {
@@ -86,6 +103,21 @@ export class FxSettings {
 
   get autoCompact(): boolean {
     return this.autoCompactValue
+  }
+
+  /** Configured right-side items, in display order. */
+  get statusLine(): StatusLineItemId[] {
+    return [...this.statusLineValue]
+  }
+
+  /** True once the user has saved an explicit list; `false` means the file
+   * carries no `statusLine` key and the shipped default applies. */
+  get statusLineCustomized(): boolean {
+    return this.statusLineExplicit
+  }
+
+  get statusLineCommand(): StatusLineCommandConfig | undefined {
+    return this.statusLineCommandValue
   }
 
   /** The path surfaced by `/config` so users know where to look / reset. */
@@ -118,6 +150,21 @@ export class FxSettings {
     this.save()
   }
 
+  /** Persist the item list; `null` removes the key so the shipped default
+   * applies again (and the file stays minimal). */
+  setStatusLine(items: StatusLineItemId[] | null): void {
+    this.statusLineExplicit = items !== null
+    this.statusLineValue = items !== null ? [...items] : [...DEFAULT_STATUS_LINE]
+    this.save()
+  }
+
+  setStatusLineCommand(config: StatusLineCommandConfig | null): void {
+    this.statusLineCommandValue = config !== null
+      ? { command: config.command, ...(config.intervalSeconds !== undefined ? { intervalSeconds: config.intervalSeconds } : {}) }
+      : undefined
+    this.save()
+  }
+
   private save(): void {
     try {
       mkdirSync(dirname(this.filePath), { recursive: true })
@@ -128,6 +175,8 @@ export class FxSettings {
         ...(this.themeValue === DEFAULT_THEME ? {} : { theme: this.themeValue }),
         ...(this.notifyValue === DEFAULT_NOTIFY ? {} : { notify: this.notifyValue }),
         ...(this.autoCompactValue === DEFAULT_AUTO_COMPACT ? {} : { autoCompact: this.autoCompactValue }),
+        ...(this.statusLineExplicit ? { statusLine: [...this.statusLineValue] } : {}),
+        ...(this.statusLineCommandValue !== undefined ? { statusLineCommand: { ...this.statusLineCommandValue } } : {}),
       }
       writeFileSync(this.filePath, `${JSON.stringify(file, null, 2)}\n`, { encoding: 'utf8' })
     } catch {
@@ -142,6 +191,9 @@ function loadSettings(filePath: string): {
   theme: ThemeSetting
   notify: NotifyMode
   autoCompact: boolean
+  statusLine: StatusLineItemId[]
+  statusLineExplicit: boolean
+  statusLineCommand: StatusLineCommandConfig | undefined
 } {
   try {
     const parsed: unknown = JSON.parse(readFileSync(filePath, 'utf8'))
@@ -152,7 +204,10 @@ function loadSettings(filePath: string): {
       const theme = isThemeSetting(raw.theme) ? raw.theme : DEFAULT_THEME
       const notify = isNotifyMode(raw.notify) ? raw.notify : DEFAULT_NOTIFY
       const autoCompact = typeof raw.autoCompact === 'boolean' ? raw.autoCompact : DEFAULT_AUTO_COMPACT
-      return { approvalMode, autoUpdate, theme, notify, autoCompact }
+      const statusLineExplicit = Array.isArray(raw.statusLine)
+      const statusLine = parseStatusLineItems(raw.statusLine)
+      const statusLineCommand = parseStatusLineCommand(raw.statusLineCommand)
+      return { approvalMode, autoUpdate, theme, notify, autoCompact, statusLine, statusLineExplicit, statusLineCommand }
     }
   } catch {
     // absent or malformed file starts at the built-in defaults
@@ -163,5 +218,16 @@ function loadSettings(filePath: string): {
     theme: DEFAULT_THEME,
     notify: DEFAULT_NOTIFY,
     autoCompact: DEFAULT_AUTO_COMPACT,
+    statusLine: [...DEFAULT_STATUS_LINE],
+    statusLineExplicit: false,
+    statusLineCommand: undefined,
   }
+}
+
+function parseStatusLineCommand(raw: { command: string; intervalSeconds?: number } | undefined): StatusLineCommandConfig | undefined {
+  if (typeof raw !== 'object' || raw === null || typeof raw.command !== 'string' || raw.command.trim() === '') return undefined
+  const intervalSeconds = typeof raw.intervalSeconds === 'number' && Number.isFinite(raw.intervalSeconds) && raw.intervalSeconds >= 0
+    ? raw.intervalSeconds
+    : undefined
+  return { command: raw.command, ...(intervalSeconds !== undefined ? { intervalSeconds } : {}) }
 }

@@ -56,6 +56,7 @@ import { FxSettings } from './settings.js'
 import { TuiStore } from './store.js'
 import type { ToolPresenter } from './store.js'
 import { formatToolArgs } from './store.js'
+import { StatusLineWatcher } from './statusline.js'
 import { detectTerminalBackground } from './terminal-bg.js'
 import { InputHistory } from './history.js'
 import { NOTIFY_MIN_TURN_MS, notifyTurnComplete } from './notify.js'
@@ -71,7 +72,7 @@ import { createCommandRunner } from './commands/index.js'
 import type { CommandCtx, SessionForkSeed } from './commands/types.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.31.0'
+export const FX_TUI_VERSION = '0.32.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
@@ -224,6 +225,16 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
   let detectedTheme: ThemeName | null = null
   const store = new TuiStore(agent.id, modelLabel(), presenter, settings.approvalMode)
   const memory = new ApprovalMemory(process.env.DSH_HOME)
+  // Configurable status-line segments: git branch + custom command run on
+  // their own triggers; /statusline re-applies through syncStatusLine.
+  const statusLineWatcher = new StatusLineWatcher({
+    cwd: process.cwd(),
+    store,
+    getItems: () => settings.statusLine,
+    getCustomCommand: () => settings.statusLineCommand,
+  })
+  store.setStatusLineItems(settings.statusLine)
+  statusLineWatcher.start()
   // Persistent input history (↑/↓ browse): the live array is handed to the
   // editor by reference, pushes need no React notification path.
   const inputHistory = new InputHistory(process.env.DSH_HOME)
@@ -272,6 +283,8 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
       if (elapsed >= NOTIFY_MIN_TURN_MS && event.data.reason.kind !== 'aborted') {
         notifyTurnComplete(settings.notify, event.data.reason.kind !== 'error', elapsed)
       }
+      // Event-driven status-line refresh (git branch, custom command).
+      statusLineWatcher.refresh('turn-end')
     }
     // Refresh context pressure once per completed step: the meter is O(surface)
     // and the next request's size is what the user cares about.
@@ -320,6 +333,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     const compaction = ctx.get('compaction')
     if (compaction === undefined) return
     autoCompacting = true
+    store.setCompacting(true)
     try {
       store.addNotice('上下文水位较高：正在自动压缩历史（/config autocompact off 可关闭）')
       const result = await compaction.compactIfNeeded(agent, 'pressure', new AbortController().signal)
@@ -338,6 +352,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
       store.addNotice(`自动压缩失败：${error instanceof Error ? error.message : String(error)}`, 'error')
     } finally {
       autoCompacting = false
+      store.setCompacting(false)
     }
   }
 
@@ -407,6 +422,10 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     updating: () => updating,
     setUpdating: value => { updating = value },
     saveDefaultSelection: sel => defaultModelService.saveSelection(sel).catch(() => { /* persisting the default is best-effort */ }),
+    syncStatusLine: () => {
+      store.setStatusLineItems(settings.statusLine)
+      statusLineWatcher.applyConfig()
+    },
   }
   const catalog = createSkillCatalog(commandCtx)
   void catalog.refresh()
@@ -451,6 +470,9 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     syncChildCount()
     autoCompactTried = false
     store.reset(agent.id, modelLabel(), agent.session.snapshotEvents())
+    // The custom status output belongs to the outgoing session; repopulate
+    // both event-driven segments for the adopted one.
+    statusLineWatcher.refresh('session-switch')
   }
 
   async function switchSession(sessionId: string): Promise<void> {
@@ -539,6 +561,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
 
 async function shutdown(): Promise<void> {
   detachResizeRebuild()
+  statusLineWatcher.dispose()
   instance?.unmount()
   store.dispose()
   if (agent.status === 'running') {
@@ -894,6 +917,7 @@ function bottomFlush(): void {
 
   ctx.effect(() => () => {
     detachResizeRebuild()
+    statusLineWatcher.dispose()
     store.dispose()
     instance?.unmount()
   })

@@ -18,6 +18,7 @@ export const builtinCommands: readonly MenuEntry[] = [
   { name: 'doctor', description: '环境自检（Node/路由/密钥/终端）', kind: 'builtin' },
   { name: 'config', description: '查看 / 修改设置（权限、更新、通知、自动压缩）', kind: 'builtin' },
   { name: 'theme', description: '切换配色主题：自动 / 浅色 / 深色 / Ghostty 精选', kind: 'builtin' },
+  { name: 'statusline', description: '配置状态栏条目与自定义命令', kind: 'builtin' },
   { name: 'export', description: '导出当前会话为 Markdown', kind: 'builtin' },
   { name: 'copy', description: '复制最后一条回复（Markdown 原文）到剪贴板', kind: 'builtin' },
   { name: 'edit', description: '用 $EDITOR 编写长消息', kind: 'builtin' },

@@ -90,4 +90,7 @@ export interface CommandCtx {
   setUpdating(value: boolean): void
   /** Persist a selection as the startup default (best-effort). */
   saveDefaultSelection(sel: ModelSelection): Promise<void>
+  /** Re-apply status-line configuration after a settings change: seed the
+   * store snapshot and re-arm the watcher's sources. */
+  syncStatusLine(): void
 }

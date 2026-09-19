@@ -1,11 +1,10 @@
 /**
- * The live status line: spinner + phase on the left, context/usage/effort on
- * the right. Model and session id live only in the welcome banner — repeating
- * them here would duplicate it. The left side degrades (reasoning suffix,
- * then detail) before it is allowed to wrap, so the line never breaks the
- * layout. On the right, the context water level colors amber at 80% and red
- * at 95%, and low-priority segments (effort, then usage) drop first when the
- * terminal is narrow.
+ * The live status line: spinner + phase on the left, the configured item
+ * segments on the right. The left side is the session's heartbeat and is not
+ * configurable; the right side renders whatever `/statusline` saved (via
+ * buildStatusSegments — unavailable sources simply hide). Segments degrade
+ * (lowest priority first, rightmost among equals) before the line is allowed
+ * to wrap, and the context water level colors amber at 80% and red at 95%.
  */
 
 import { useEffect, useState } from 'react'
@@ -13,6 +12,8 @@ import type { ReactElement } from 'react'
 import { Box, Text, useStdout } from 'ink'
 import stringWidth from 'string-width'
 import type { Phase, RetryWait } from '../store.js'
+import { buildStatusSegments } from '../statusline.js'
+import type { StatusLineItemId } from '../statusline.js'
 import { formatCount } from '../text.js'
 import { theme } from './theme.js'
 
@@ -47,6 +48,16 @@ export interface StatusBarProps {
   effortLabel: string
   /** Live LLM retry wait; null when the current request is not backing off. */
   retryWait: RetryWait | null
+  /** Configured right-side items, in display order (/statusline). */
+  items: readonly StatusLineItemId[]
+  /** provider/model route label. */
+  model: string
+  /** Current git branch; '' hides the segment. */
+  gitBranch: string
+  /** Custom command's first stdout line; null hides the segment. */
+  customStatus: string | null
+  /** Auto-compaction in progress. */
+  compacting: boolean
 }
 
 export function StatusBar(props: StatusBarProps): ReactElement {
@@ -70,15 +81,21 @@ export function StatusBar(props: StatusBarProps): ReactElement {
         ? '执行工具'
         : '就绪'
 
-  const context = contextText(props.contextTokens, props.contextWindow)
-  const contextColor = contextTone(props.contextTokens, props.contextWindow)
-  // Degradation order: effort drops first, then usage — the context level
-  // survives narrow terminals, colored by its pressure.
-  const parts: Array<{ text: string; priority: number; color?: string }> = [
-    { text: context, priority: 2, ...(contextColor !== undefined ? { color: contextColor } : {}) },
-    { text: props.usage, priority: 1 },
-    { text: props.effortLabel !== '' ? `推理 ${props.effortLabel}` : '', priority: 0 },
-  ]
+  const built = buildStatusSegments(props.items, {
+    contextTokens: props.contextTokens,
+    contextWindow: props.contextWindow,
+    usage: props.usage,
+    effortLabel: props.effortLabel,
+    model: props.model,
+    gitBranch: props.gitBranch,
+    customStatus: props.customStatus,
+    compacting: props.compacting,
+  })
+  const parts = built.map(segment => ({
+    text: segment.text,
+    priority: segment.priority,
+    color: segment.tone === 'danger' ? theme.danger : segment.tone === 'warning' ? theme.warning : undefined,
+  }))
   const kept = parts.map(p => p.text)
   const fits = (): boolean => displayWidth(kept.filter(t => t !== '').join(' · ')) <= width - 10
   while (!fits()) {
@@ -143,22 +160,4 @@ function retryText(wait: RetryWait): string {
   const max = wait.maxRetries !== null ? `/${wait.maxRetries}` : ''
   const delay = wait.delayMs !== null ? ` · ${Math.max(1, Math.round(wait.delayMs / 1000))}s` : ''
   return `⟳ 重试 ${wait.attempt}${max}${delay}（${wait.reason}）`
-}
-
-/** Context water-level text like `上下文 45% (58k/128k)`; empty before any measurement. */
-function contextText(tokens: number, window: number | undefined): string {
-  if (tokens <= 0) return ''
-  const used = formatCount(tokens)
-  if (window === undefined || window <= 0) return `上下文 ~${used}`
-  const percent = Math.round((tokens / window) * 100)
-  return `上下文 ${percent}% (${used}/${formatCount(window)})`
-}
-
-/** Pressure tone for the context segment: red at 95%, amber at 80%, muted otherwise. */
-function contextTone(tokens: number, window: number | undefined): string | undefined {
-  if (tokens <= 0 || window === undefined || window <= 0) return undefined
-  const ratio = tokens / window
-  if (ratio >= 0.95) return theme.danger
-  if (ratio >= 0.8) return theme.warning
-  return undefined
 }
