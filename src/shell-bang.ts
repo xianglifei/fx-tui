@@ -11,6 +11,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { formatCount, truncateLine } from './text.js'
 
 export interface ShellBang {
   readonly command: string
@@ -122,16 +123,29 @@ export function runShellCommand(
 
 // -- Transcript presentation ----------------------------------------------------
 
+/** One-line status of a finished run: `✓ 退出 0 · 1.2s` family. Shared by the
+ * result panel and the stashed transport block. */
+export function shellStatusLine(outcome: ShellRunOutcome): string {
+  const seconds = formatDuration(outcome.durationMs)
+  if (outcome.timedOut) return `✗ 超时（${formatDuration(outcome.timeoutMs)} 后终止）`
+  if (outcome.signalName !== null) return `✗ 信号 ${outcome.signalName} · ${seconds}`
+  if (outcome.exitCode === 0) return `✓ 退出 0 · ${seconds}`
+  return `✗ 退出码 ${outcome.exitCode ?? '?'} · ${seconds}`
+}
+
+/** Short machine-ish status for the tray summary line: `退出 0` / `退出 1` /
+ * `信号 X` / `超时`. */
+function shellStatusShort(outcome: ShellRunOutcome): string {
+  if (outcome.timedOut) return '超时'
+  if (outcome.signalName !== null) return `信号 ${outcome.signalName}`
+  return `退出 ${outcome.exitCode ?? '?'}`
+}
+
 /** Transcript rows for a finished run: one status header + the (capped)
  * output. The cap is head+tail — shell failures print at the end, so a pure
  * head cap would hide exactly the lines that matter. */
 export function shellPanel(outcome: ShellRunOutcome, cap: number): { title: string; lines: readonly string[] } {
-  const seconds = formatDuration(outcome.durationMs)
-  let status: string
-  if (outcome.timedOut) status = `✗ 超时（${formatDuration(outcome.timeoutMs)} 后终止）`
-  else if (outcome.signalName !== null) status = `✗ 信号 ${outcome.signalName} · ${seconds}`
-  else if (outcome.exitCode === 0) status = `✓ 退出 0 · ${seconds}`
-  else status = `✗ 退出码 ${outcome.exitCode ?? '?'} · ${seconds}`
+  let status = shellStatusLine(outcome)
   if (outcome.truncated) status += ' · 输出过长已截断'
   const raw = outcome.output === '' ? ['（无输出）'] : outcome.output.replace(/\n+$/, '').split('\n')
   const budget = Math.max(4, cap)
@@ -147,6 +161,38 @@ export function shellPanel(outcome: ShellRunOutcome, cap: number): { title: stri
   return { title: `$ ${title}`, lines }
 }
 
+// -- Stash transport ------------------------------------------------------------
+
+/** Char cap on the stashed transport block — the model reads it verbatim as
+ * part of the next user message, so it must inform without flooding context.
+ * Independent of the display panel's line cap. */
+export const STASH_OUTPUT_MAX_CHARS = 8000
+
+/** The self-describing text block stashed into the next user message: what
+ * ran, how it ended, and the (head+tail capped) output. */
+export function stashTransportText(outcome: ShellRunOutcome): string {
+  const raw = outcome.output.replace(/\n+$/, '')
+  let output = raw
+  if (raw.length > STASH_OUTPUT_MAX_CHARS) {
+    const head = Math.ceil(STASH_OUTPUT_MAX_CHARS / 2)
+    const tail = STASH_OUTPUT_MAX_CHARS - head
+    output = `${raw.slice(0, head)}\n…（中间省略 ${raw.length - head - tail} 字符）\n${raw.slice(raw.length - tail)}`
+  }
+  return [
+    '用户在本地终端手动执行了命令（输出可能已截断），结果如下：',
+    `$ ${outcome.command}`,
+    shellStatusLine(outcome),
+    '',
+    output === '' ? '（无输出）' : output,
+  ].join('\n')
+}
+
+/** One-line tray/echo label: `` $ npm test · 退出 1 · 2.1k 字符 ``. */
+export function stashSummary(outcome: ShellRunOutcome): string {
+  const chars = formatCount(outcome.output.length)
+  return `$ ${truncateLine(outcome.command, 40)} · ${shellStatusShort(outcome)} · ${chars} 字符`
+}
+
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
@@ -159,6 +205,8 @@ function formatDuration(ms: number): string {
 export interface ShellPassthroughUi {
   addNotice(text: string, tone?: 'info' | 'warn' | 'error'): void
   addPanel(title: string, lines: readonly string[]): void
+  /** Stash one run's transport block for the next submitted message. */
+  addPendingOutput(output: { text: string; summary: string; command: string }): void
 }
 
 /** A run this short needs no "正在执行" marker — the panel lands in the same
@@ -167,11 +215,13 @@ const RUNNING_NOTICE_DELAY_MS = 400
 
 /** Launch one passthrough run and report it to the transcript. Long runs get
  * a one-line marker after a short grace window so silence is never ambiguous;
- * fast runs only ever produce the result panel. */
+ * fast runs only ever produce the result panel. Unless `stash: false` (the
+ * `!!` spelling), the output is additionally queued onto the pending-output
+ * tray to ride the user's next message into the model's context. */
 export async function launchShellPassthrough(
   command: string,
   ui: ShellPassthroughUi,
-  opts: { timeoutMs?: number; maxOutputBytes?: number; cwd?: string; shell?: string } = {},
+  opts: { stash?: boolean; timeoutMs?: number; maxOutputBytes?: number; cwd?: string; shell?: string } = {},
 ): Promise<void> {
   let announced = false
   const marker = setTimeout(() => {
@@ -191,4 +241,7 @@ export async function launchShellPassthrough(
   const cap = Math.max(10, (process.stdout.rows ?? 40) - 12)
   const { title, lines } = shellPanel(outcome, cap)
   ui.addPanel(title, lines)
+  if (opts.stash !== false) {
+    ui.addPendingOutput({ text: stashTransportText(outcome), summary: stashSummary(outcome), command: outcome.command })
+  }
 }

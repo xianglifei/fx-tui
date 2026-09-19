@@ -144,3 +144,84 @@ describe('TuiStore llm retry events', () => {
   })
 })
 
+describe('TuiStore pending-output tray', () => {
+  const OUTPUT = (command: string) => ({
+    command,
+    text: `用户在本地终端手动执行了命令：\n$ ${command}\n✓ 退出 0\n\nout-of-${command}`,
+    summary: `$ ${command} · 退出 0 · 12 字符`,
+  })
+
+  it('add/consume round-trips the tray and updates the snapshot', () => {
+    const store = new TuiStore('s1', 'model')
+    store.addPendingOutput(OUTPUT('npm test'))
+    expect(store.getSnapshot().pendingOutputs).toHaveLength(1)
+
+    const consumed = store.consumePendingOutputs()
+    expect(consumed).toHaveLength(1)
+    expect(consumed[0]!.command).toBe('npm test')
+    expect(store.getSnapshot().pendingOutputs).toEqual([])
+  })
+
+  it('removeLastStashed retracts in real stash order across both trays', () => {
+    const store = new TuiStore('s1', 'model')
+    const ref = { id: 'img-1' } as never
+    store.addPendingImage(ref, 'a.png')
+    store.addPendingOutput(OUTPUT('ls'))
+    store.addPendingImage({ id: 'img-2' } as never, 'b.png')
+
+    // newest first: b.png → ls → a.png
+    expect(store.removeLastStashed()).toEqual({ kind: 'image', label: 'b.png' })
+    expect(store.removeLastStashed()).toEqual({ kind: 'output', command: 'ls' })
+    expect(store.removeLastStashed()).toEqual({ kind: 'image', label: 'a.png' })
+    expect(store.removeLastStashed()).toBeUndefined()
+    expect(store.getSnapshot().pendingImages).toEqual([])
+    expect(store.getSnapshot().pendingOutputs).toEqual([])
+  })
+
+  it('clearStash empties both trays and reports the count', () => {
+    const store = new TuiStore('s1', 'model')
+    store.addPendingImage({ id: 'img-1' } as never, 'a.png')
+    store.addPendingOutput(OUTPUT('ls'))
+    expect(store.clearStash()).toBe(2)
+    expect(store.clearStash()).toBe(0)
+  })
+
+  it('consuming images leaves outputs untouched and vice versa', () => {
+    const store = new TuiStore('s1', 'model')
+    store.addPendingImage({ id: 'img-1' } as never, 'a.png')
+    store.addPendingOutput(OUTPUT('ls'))
+    expect(store.consumePendingImages()).toHaveLength(1)
+    expect(store.getSnapshot().pendingOutputs).toHaveLength(1)
+    expect(store.consumePendingOutputs()).toHaveLength(1)
+  })
+
+  it('reset() clears the output tray', () => {
+    const store = new TuiStore('s1', 'model')
+    store.addPendingOutput(OUTPUT('ls'))
+    store.reset('s2', 'model', [])
+    expect(store.getSnapshot().pendingOutputs).toEqual([])
+  })
+})
+
+describe('TuiStore echoUser with ride-along trays', () => {
+  it('idle echo renders 🧾 output labels on the user item', () => {
+    const store = new TuiStore('s1', 'model')
+    store.echoUser('m1', '修复失败的测试', { outputs: ['$ npm test · 退出 1 · 2.1k 字符'] })
+
+    const item = store.getSnapshot().items.at(-1)
+    expect(item).toMatchObject({ kind: 'user', text: '修复失败的测试', outputs: ['$ npm test · 退出 1 · 2.1k 字符'] })
+  })
+
+  it('busy echo queues with outputs and promotes them on the session event', () => {
+    const store = new TuiStore('s1', 'model')
+    store.onEvent(TURN_START)
+    store.echoUser('m9', '继续', { outputs: ['$ ls · 退出 0 · 5 字符'], mode: 'steer' })
+    expect(store.getSnapshot().queuedMessages[0]).toMatchObject({ text: '继续', outputs: ['$ ls · 退出 0 · 5 字符'], mode: 'steer' })
+
+    store.onEvent(ev('user/message', { id: 'm9', source: { kind: 'user' }, content: [{ type: 'text', text: '继续' }] }, 50))
+    const item = store.getSnapshot().items.at(-1)
+    expect(item).toMatchObject({ kind: 'user', text: '继续', outputs: ['$ ls · 退出 0 · 5 字符'] })
+    expect(store.getSnapshot().queuedMessages).toEqual([])
+  })
+})
+

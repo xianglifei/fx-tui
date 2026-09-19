@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { launchShellPassthrough, parseShellBang, runShellCommand, shellPanel } from './shell-bang.js'
+import {
+  launchShellPassthrough,
+  parseShellBang,
+  runShellCommand,
+  shellPanel,
+  stashSummary,
+  stashTransportText,
+} from './shell-bang.js'
 import type { ShellPassthroughUi } from './shell-bang.js'
 
 describe('parseShellBang', () => {
@@ -102,14 +109,21 @@ describe('shellPanel', () => {
 })
 
 describe('launchShellPassthrough', () => {
-  function makeUi(): ShellPassthroughUi & { notices: string[]; panels: { title: string; lines: readonly string[] }[] } {
+  function makeUi(): ShellPassthroughUi & {
+    notices: string[]
+    panels: { title: string; lines: readonly string[] }[]
+    stashed: { text: string; summary: string; command: string }[]
+  } {
     const notices: string[] = []
     const panels: { title: string; lines: readonly string[] }[] = []
+    const stashed: { text: string; summary: string; command: string }[] = []
     return {
       notices,
       panels,
+      stashed,
       addNotice: (text, _tone) => { notices.push(text) },
       addPanel: (title, lines) => { panels.push({ title, lines }) },
+      addPendingOutput: output => { stashed.push(output) },
     }
   }
 
@@ -119,5 +133,64 @@ describe('launchShellPassthrough', () => {
     expect(ui.notices).toEqual([])
     expect(ui.panels).toHaveLength(1)
     expect(ui.panels[0]!.title).toBe('$ echo done')
+  })
+
+  it('stashes by default (`!`): transport block, summary, command', async () => {
+    const ui = makeUi()
+    await launchShellPassthrough('echo payload', ui, { shell: '/bin/bash' })
+    expect(ui.stashed).toHaveLength(1)
+    const stash = ui.stashed[0]!
+    expect(stash.command).toBe('echo payload')
+    expect(stash.text).toContain('$ echo payload')
+    expect(stash.text).toContain('payload')
+    expect(stash.text).toContain('✓ 退出 0')
+    expect(stash.summary).toContain('$ echo payload')
+    expect(stash.summary).toContain('退出 0')
+  })
+
+  it('stash: false (`!!`) keeps the output out of the tray', async () => {
+    const ui = makeUi()
+    await launchShellPassthrough('echo local-only', ui, { stash: false, shell: '/bin/bash' })
+    expect(ui.stashed).toEqual([])
+    expect(ui.panels).toHaveLength(1)
+  })
+
+  it('caps the transport block head+tail when the output is huge', async () => {
+    const ui = makeUi()
+    await launchShellPassthrough('yes 0123456789 | head -c 60000', ui, { shell: '/bin/bash' })
+    const stash = ui.stashed[0]!
+    expect(stash.text.length).toBeLessThan(12000)
+    expect(stash.text).toContain('中间省略')
+    // the head of the output survives right after the block's header lines
+    expect(stash.text).toContain('结果如下：\n$ yes 0123456789 | head -c 60000\n✓ 退出 0 · ')
+    expect(stash.text).toContain('\n0123456789\n')
+  }, 15_000)
+})
+
+describe('stashTransportText / stashSummary', () => {
+  const outcome = {
+    command: 'npm test', exitCode: 1, signalName: null, timedOut: false,
+    timeoutMs: 600_000, durationMs: 300, output: 'FAIL src/a.test.ts\n', truncated: false,
+  }
+
+  it('builds a self-describing block the model can act on', () => {
+    const text = stashTransportText(outcome)
+    expect(text).toContain('用户在本地终端手动执行了命令')
+    expect(text).toContain('$ npm test')
+    expect(text).toContain('✗ 退出码 1')
+    expect(text).toContain('FAIL src/a.test.ts')
+  })
+
+  it('summary is one short line with command, status, and size', () => {
+    const summary = stashSummary(outcome)
+    expect(summary).toContain('$ npm test')
+    expect(summary).toContain('退出 1')
+    expect(summary).toContain('字符')
+  })
+
+  it('summary truncates a long command', () => {
+    const summary = stashSummary({ ...outcome, command: 'x'.repeat(120) })
+    expect(summary.length).toBeLessThan(120)
+    expect(summary).toContain('…')
   })
 })

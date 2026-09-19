@@ -24,7 +24,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Dispatch, ReactElement, SetStateAction } from 'react'
 import { Box, Text, useInput, usePaste, useStdout } from 'ink'
 import stringWidth from 'string-width'
-import type { PendingImage, TuiStore } from '../store.js'
+import type { PendingImage, PendingOutput, TuiStore } from '../store.js'
 import { readClipboardImage, readClipboardText } from '../clipboard.js'
 import { isExistingImagePath, parsePathChunk } from '../path-drops.js'
 import { OSC11_REMNANT_RE } from '../terminal-bg.js'
@@ -62,6 +62,8 @@ export interface InputBoxProps {
   /** Show the free-text answer hint inside the editor (empty editor only). */
   showFreeTextHint: boolean
   pendingImages: readonly PendingImage[]
+  /** `!`-run outputs stashed for the next message (the output tray). */
+  pendingOutputs: readonly PendingOutput[]
   /** Editor state lives in App (not here): the splash-filler budget must be
    * computed from the input's height in the SAME commit that paints the input,
    * and a late useLayoutEffect report paints one oversized frame first — the
@@ -150,7 +152,7 @@ const MAX_FILE_MATCHES = 60
 const MENU_DESC_COLUMNS = 40
 
 export function InputBox(props: InputBoxProps): ReactElement {
-  const { store, history, frozen, questionFreeText, showFreeTextHint, pendingImages, ed, setEd, editorVisibleRows, menu, setMenu, listCommands, runCommand, onShell, onSubmit, onRecallPending, onClipboardImage, onDropFiles, onInterrupt, onExit } = props
+  const { store, history, frozen, questionFreeText, showFreeTextHint, pendingImages, pendingOutputs, ed, setEd, editorVisibleRows, menu, setMenu, listCommands, runCommand, onShell, onSubmit, onRecallPending, onClipboardImage, onDropFiles, onInterrupt, onExit } = props
   const [histIdx, setHistIdx] = useState(-1)
   const [draft, setDraft] = useState<string | null>(null)
   const menuIndexRef = useRef(0)
@@ -548,14 +550,17 @@ export function InputBox(props: InputBoxProps): ReactElement {
     }
 
     // Attachment tray edits: with an empty editor, Backspace retracts the
-    // newest pending image and Alt+Backspace empties the tray; once text is in
-    // the editor they keep their normal editing role.
-    if (key.backspace && isEmpty && pendingImages.length > 0) {
+    // newest stashed item (image or `!` output — real stash order) and
+    // Alt+Backspace empties both trays; once text is in the editor they keep
+    // their normal editing role.
+    if (key.backspace && isEmpty && (pendingImages.length > 0 || pendingOutputs.length > 0)) {
       if (key.meta || key.ctrl) {
-        store.addNotice(`已清空 ${store.clearPendingImages()} 张待发送图片`)
+        store.addNotice(`已清空 ${store.clearStash()} 条暂存（图片与命令输出）`)
       } else {
-        const removed = store.removeLastPendingImage()
-        if (removed !== undefined) store.addNotice(`已移除待发送图片：${removed.label}`)
+        const removed = store.removeLastStashed()
+        if (removed === undefined) store.addNotice('暂存区已空', 'warn')
+        else if (removed.kind === 'image') store.addNotice(`已移除待发送图片：${removed.label}`)
+        else store.addNotice(`已移除暂存命令输出：${removed.command}`)
       }
       return
     }
@@ -738,7 +743,7 @@ export function InputBox(props: InputBoxProps): ReactElement {
     const bang = parseShellBang(text)
     if (bang !== undefined) {
       if (bang.command === '') {
-        store.addNotice('用法：! <命令> — 在本地 shell 执行，结果以卡片显示（!! 同义）', 'warn')
+        store.addNotice('用法：! <命令> — 本地执行，输出暂存并随下一条消息进入上下文（!! 则仅本地查看）', 'warn')
         return
       }
       onShell(text)
@@ -873,6 +878,12 @@ export function InputBox(props: InputBoxProps): ReactElement {
             <Text dimColor>{trayDetailText(pendingImages)}</Text>
           </>
         )}
+        {pendingOutputs.length > 0 && (
+          <>
+            <Text color={theme.approval}>{outputTrayHeadline(pendingOutputs.length)}</Text>
+            <Text dimColor>{outputsDetailText(pendingOutputs)}</Text>
+          </>
+        )}
         {shownRows.map((row, index) => (
           <Text key={editorScroll + index}>
             {editorScroll + index === layout.cursorRow
@@ -945,6 +956,25 @@ export function imageTrayRows(images: readonly PendingImage[], columns: number):
   const inner = Math.max(8, columns - 4)
   return textRows(`📎 已附加 ${images.length} 张图片，将随下一条消息发送`, inner) +
     textRows(trayDetailText(images), inner)
+}
+
+/** Headline of the output tray; the render and the estimator share one string. */
+export function outputTrayHeadline(count: number): string {
+  return `🧾 已暂存 ${count} 条命令输出，将随下一条消息发送（Enter 发送 · 空输入框 ⌫ 撤销）`
+}
+
+/** One-line summaries of the stashed `!` outputs. */
+function outputsDetailText(outputs: readonly PendingOutput[]): string {
+  return outputs.map(output => output.summary).join(' · ')
+}
+
+/** Rows the output tray occupies inside the editor border (0 when empty);
+ * shared by the render and the height estimate. */
+export function outputTrayRows(outputs: readonly PendingOutput[], columns: number): number {
+  if (outputs.length === 0) return 0
+  const inner = Math.max(8, columns - 4)
+  return textRows(outputTrayHeadline(outputs.length), inner) +
+    textRows(outputsDetailText(outputs), inner)
 }
 
 /** Floor on the visible editor rows: even a tiny terminal keeps the editor

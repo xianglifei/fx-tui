@@ -12,6 +12,7 @@
  * name/args/text otherwise.
  */
 
+import { randomUUID } from 'node:crypto'
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, TokenUsage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -30,7 +31,7 @@ import { formatCount, formatElapsed, truncateLine } from './text.js'
 
 // -- Transcript items ---------------------------------------------------------
 
-export interface UserItem { readonly kind: 'user'; readonly text: string; readonly images?: readonly string[] }
+export interface UserItem { readonly kind: 'user'; readonly text: string; readonly images?: readonly string[]; readonly outputs?: readonly string[] }
 export interface AssistantItem { readonly kind: 'assistant'; readonly text: string; readonly interrupted: boolean }
 
 export interface ToolItem {
@@ -82,6 +83,20 @@ export interface PendingImage {
 }
 
 /**
+ * A `!`-run's output stashed for the next submitted message: dsh has no
+ * inject-without-turn seam, so manual-run output rides the user's next
+ * message as an extra text block — visible to the model without triggering
+ * a reply on its own. `text` is the capped transport block; `summary` is
+ * the one-line tray/echo label.
+ */
+export interface PendingOutput {
+  readonly id: string
+  readonly command: string
+  readonly text: string
+  readonly summary: string
+}
+
+/**
  * A message submitted while the agent was busy. 'queue' rides as its own next
  * turn (Tab / follow-up); 'steer' enters at the next step boundary (Enter
  * while busy). Both promote into the transcript when their session event lands.
@@ -90,6 +105,7 @@ export interface QueuedMessage {
   readonly id: string
   readonly text: string
   readonly images: readonly string[]
+  readonly outputs: readonly string[]
   readonly mode: 'queue' | 'steer'
 }
 
@@ -121,6 +137,7 @@ export interface Snapshot {
   readonly items: readonly FinalItem[]
   readonly pendingTools: readonly PendingTool[]
   readonly pendingImages: readonly PendingImage[]
+  readonly pendingOutputs: readonly PendingOutput[]
   readonly queuedMessages: readonly QueuedMessage[]
   readonly todos: readonly TodoItem[]
   readonly childAgents: number
@@ -163,6 +180,9 @@ export class TuiStore {
   private items: FinalItem[] = []
   private pendingTools = new Map<string, PendingTool>()
   private pendingImages: PendingImage[] = []
+  private pendingOutputs: PendingOutput[] = []
+  /** Stash order across both trays, so ⌫ retracts whichever landed last. */
+  private stashOrder: Array<{ kind: 'image'; ref: ImageAttachmentRef } | { kind: 'output'; id: string }> = []
   private queuedMessages: QueuedMessage[] = []
   private todos: TodoItem[] = []
   private childAgentCount = 0
@@ -234,6 +254,7 @@ export class TuiStore {
       items: [...this.items],
       pendingTools: [...this.pendingTools.values()],
       pendingImages: [...this.pendingImages],
+      pendingOutputs: [...this.pendingOutputs],
       queuedMessages: [...this.queuedMessages],
       todos: [...this.todos],
       childAgents: this.childAgentCount,
@@ -327,6 +348,7 @@ export class TuiStore {
             kind: 'user',
             text: queued.text,
             ...(queued.images.length > 0 ? { images: queued.images } : {}),
+            ...(queued.outputs.length > 0 ? { outputs: queued.outputs } : {}),
           })
           break
         }
@@ -578,13 +600,26 @@ export class TuiStore {
   /** Echo a submitted message: immediately as a transcript item when idle, or
    * as a pending indicator when the agent is busy (promoted on its session
    * event). `mode` only labels the indicator — delivery semantics belong to
-   * the caller's steer/follow-up choice. */
-  echoUser(id: string, text: string, images?: readonly string[], mode: 'queue' | 'steer' = 'queue'): void {
+   * the caller's steer/follow-up choice. The ride-along trays (images, `!`
+   * outputs) are echoed as `📎`/`🧾` label lines so the user can see what the
+   * model is about to receive. */
+  echoUser(
+    id: string,
+    text: string,
+    opts: { images?: readonly string[]; outputs?: readonly string[]; mode?: 'queue' | 'steer' } = {},
+  ): void {
     this.echoedId = id
+    const images = opts.images ?? []
+    const outputs = opts.outputs ?? []
     if (this.phase !== 'idle') {
-      this.queuedMessages.push({ id, text, images: images ?? [], mode })
+      this.queuedMessages.push({ id, text, images, outputs, mode: opts.mode ?? 'queue' })
     } else {
-      this.items.push({ kind: 'user', text, ...(images !== undefined && images.length > 0 ? { images } : {}) })
+      this.items.push({
+        kind: 'user',
+        text,
+        ...(images.length > 0 ? { images } : {}),
+        ...(outputs.length > 0 ? { outputs } : {}),
+      })
       this.phase = 'thinking'
       this.phaseDetail = ''
     }
@@ -609,6 +644,8 @@ export class TuiStore {
     }
     this.pendingTools.clear()
     this.pendingImages = []
+    this.pendingOutputs = []
+    this.stashOrder = []
     this.queuedMessages = []
     this.todos = []
     this.childAgentCount = 0
@@ -651,6 +688,7 @@ export class TuiStore {
   /** Queue an image to ride along with the next submitted message. */
   addPendingImage(ref: ImageAttachmentRef, label: string): void {
     this.pendingImages.push({ ref, label })
+    this.stashOrder.push({ kind: 'image', ref })
     this.commit()
   }
 
@@ -659,6 +697,7 @@ export class TuiStore {
     if (this.pendingImages.length === 0) return []
     const images = this.pendingImages
     this.pendingImages = []
+    this.stashOrder = this.stashOrder.filter(entry => entry.kind !== 'image')
     this.commit()
     return images
   }
@@ -667,7 +706,11 @@ export class TuiStore {
    * undefined when the tray is already empty. */
   removeLastPendingImage(): PendingImage | undefined {
     const removed = this.pendingImages.pop()
-    if (removed !== undefined) this.commit()
+    if (removed !== undefined) {
+      const orderIndex = this.stashOrder.findIndex(entry => entry.kind === 'image' && entry.ref === removed.ref)
+      if (orderIndex >= 0) this.stashOrder.splice(orderIndex, 1)
+      this.commit()
+    }
     return removed
   }
 
@@ -676,6 +719,58 @@ export class TuiStore {
     const count = this.pendingImages.length
     if (count === 0) return 0
     this.pendingImages = []
+    this.stashOrder = this.stashOrder.filter(entry => entry.kind !== 'image')
+    this.commit()
+    return count
+  }
+
+  // -- Pending-output tray (`!` shell runs) ---------------------------------
+
+  /** Queue one `!`-run output to ride along with the next submitted message. */
+  addPendingOutput(output: Omit<PendingOutput, 'id'>): PendingOutput {
+    const pending: PendingOutput = { ...output, id: randomUUID() }
+    this.pendingOutputs.push(pending)
+    this.stashOrder.push({ kind: 'output', id: pending.id })
+    this.commit()
+    return pending
+  }
+
+  /** Take and clear the queued outputs (called when the next message is submitted). */
+  consumePendingOutputs(): PendingOutput[] {
+    if (this.pendingOutputs.length === 0) return []
+    const outputs = this.pendingOutputs
+    this.pendingOutputs = []
+    this.stashOrder = this.stashOrder.filter(entry => entry.kind !== 'output')
+    this.commit()
+    return outputs
+  }
+
+  /** Retract whatever stashed last — image or `!` output, real stash order —
+   * on Backspace over an empty editor. */
+  removeLastStashed(): { kind: 'image'; label: string } | { kind: 'output'; command: string } | undefined {
+    const entry = this.stashOrder.pop()
+    if (entry === undefined) return undefined
+    if (entry.kind === 'image') {
+      const index = this.pendingImages.findIndex(image => image.ref === entry.ref)
+      if (index < 0) return undefined
+      const [removed] = this.pendingImages.splice(index, 1)
+      this.commit()
+      return { kind: 'image', label: removed!.label }
+    }
+    const index = this.pendingOutputs.findIndex(output => output.id === entry.id)
+    if (index < 0) return undefined
+    const [removed] = this.pendingOutputs.splice(index, 1)
+    this.commit()
+    return { kind: 'output', command: removed!.command }
+  }
+
+  /** Drop every stashed item across both trays (`Alt+Backspace`); returns the count. */
+  clearStash(): number {
+    const count = this.pendingImages.length + this.pendingOutputs.length
+    if (count === 0) return 0
+    this.pendingImages = []
+    this.pendingOutputs = []
+    this.stashOrder = []
     this.commit()
     return count
   }

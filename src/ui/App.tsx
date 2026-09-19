@@ -26,7 +26,7 @@ import { renderFileDiffs } from '../diff.js'
 import { renderMarkdownLines } from '../markdown.js'
 import { BANNER_BOX_HEIGHT, WelcomeBanner } from './Banner.js'
 import { estimateApprovalHeight, estimateItemHeight, estimateQuestionHeight, formatElapsed, headTailPreview, questionHintText, questionOptionRow, truncateLine, userBarRows } from './estimate.js'
-import { computeInputHeight, countEditorRows, editorRowsForSpace, FREE_TEXT_HINT, imageTrayRows, MENU_PANE_ROWS, seedToState } from './Input.js'
+import { computeInputHeight, countEditorRows, editorRowsForSpace, FREE_TEXT_HINT, imageTrayRows, MENU_PANE_ROWS, outputTrayRows, seedToState } from './Input.js'
 import { textRows } from './ink-text.js'
 import { InputBox } from './Input.js'
 import type { Menu } from './Input.js'
@@ -120,7 +120,7 @@ export function App(props: AppProps): ReactElement {
   const rebuildSlack = props.rebuilding === true && firstFrameRef.current ? 2 : 0
   const isEmpty = ed.lines.length === 1 && ed.lines[0] === ''
   const menuOpen = menu !== null && menu.rows.length > 0
-  const trayRows = imageTrayRows(snap.pendingImages, liveColumns)
+  const trayRows = imageTrayRows(snap.pendingImages, liveColumns) + outputTrayRows(snap.pendingOutputs, liveColumns)
   const editorInner = Math.max(8, liveColumns - 4)
   const hintRows = snap.questionFreeText && isEmpty ? textRows(FREE_TEXT_HINT, editorInner) : 0
   // One markdown pass per frame, shared by the filler budget below and
@@ -252,6 +252,7 @@ export function App(props: AppProps): ReactElement {
           questionFreeText={snap.question !== null && snap.questionFreeText}
           showFreeTextHint={snap.questionFreeText && isEmpty}
           pendingImages={snap.pendingImages}
+          pendingOutputs={snap.pendingOutputs}
           ed={ed}
           setEd={setEd}
           editorVisibleRows={editorVisibleRows}
@@ -295,6 +296,9 @@ function FinalItemView(props: { item: FinalItem; width: number; columns: number 
           ))}
           {(item.images ?? []).map((label, i) => (
             <Text key={`img-${i}`} color={theme.approval} dimColor>{`📎 ${label}`}</Text>
+          ))}
+          {(item.outputs ?? []).map((summary, i) => (
+            <Text key={`out-${i}`} color={theme.approval} dimColor>{`🧾 ${summary}`}</Text>
           ))}
         </Box>
       )

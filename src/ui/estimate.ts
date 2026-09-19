@@ -56,9 +56,10 @@ export function estimateItemHeight(item: FinalItem, width: number, columns: numb
     case 'user':
       // Exact: the bar wraps each source line with the same wrap-ansi options
       // Ink applies, then pads every row to the full width (padding cannot
-      // re-wrap); +1 for the lead gap row.
+      // re-wrap); +1 for the lead gap row; each 📎/🧾 ride-along label is one
+      // truncated row.
       return 1 + userBarRows(item.text, columns).length +
-        (item.images?.length ?? 0)
+        (item.images?.length ?? 0) + (item.outputs?.length ?? 0)
     case 'assistant':
       // Exact: the same renderer the view uses; its lines fit within `width`.
       // +1 lead gap row above every reply.
