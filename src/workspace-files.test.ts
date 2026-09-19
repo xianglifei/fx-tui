@@ -17,6 +17,11 @@ describe('scorePath', () => {
     expect(scorePath('appts', 'src/app.ts')).not.toBeNull()
     expect(scorePath('appts', 'src/app.ts')).toBeGreaterThan(0)
   })
+
+  it('treats a directory trailing slash as presentation, not name', () => {
+    expect(scorePath('ui', 'src/ui/')!).toBeGreaterThan(scorePath('ui', 'src/uix/')!)
+    expect(scorePath('app', 'src/app/')!).toBeGreaterThan(scorePath('app', 'src/myapp/')!)
+  })
 })
 
 describe('fuzzyMatchPaths', () => {
@@ -56,6 +61,9 @@ describe('listWorkspaceFiles', () => {
 
       expect(files).toContain('src/app.ts')
       expect(files).toContain('package.json')
+      // directories are listed too, with a trailing slash; ignored ones stay pruned
+      expect(files).toContain('src/')
+      expect(files).not.toContain('node_modules/')
       expect(files.some(f => f.includes('node_modules'))).toBe(false)
       expect(files.some(f => f.includes('.git'))).toBe(false)
       expect(files.some(f => f.startsWith('dist'))).toBe(false)
@@ -64,5 +72,10 @@ describe('listWorkspaceFiles', () => {
       invalidateWorkspaceFiles()
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it('ranks a basename-matching directory among files by the same scorer', async () => {
+    const matches = fuzzyMatchPaths('ui', ['src/ui/Input.tsx', 'src/ui/', 'src/main.ts'], 10)
+    expect(matches[0]!.path).toBe('src/ui/')
   })
 })

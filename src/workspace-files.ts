@@ -1,9 +1,11 @@
 /**
- * Workspace file listing and fuzzy path matching for @-references.
+ * Workspace listing and fuzzy path matching for @-references.
  *
  * The listing is a shallow cached walk (30s TTL) of the session workspace
- * that skips VCS/build directories and caps the entry count; matching is a
- * subsequence scorer with a basename bonus so `@app ts` finds `src/app.ts`.
+ * that skips VCS/build directories and caps the entry count; files come back
+ * as plain relative paths, directories with a trailing `/` (completable as
+ * `@src/`), and matching is a subsequence scorer with a basename bonus so
+ * `@app ts` finds `src/app.ts` and `@ui` finds `src/ui/`.
  */
 
 import { readdir } from 'node:fs/promises'
@@ -47,7 +49,8 @@ export function invalidateWorkspaceFiles(): void {
  * them, often hundreds of thousands of Dirents) before any filtering can
  * run. Here an ignored directory is pruned the moment its entry is seen —
  * it is never entered, so its contents never exist in memory at all.
- * Directory symlinks are not followed (no cycles).
+ * Directory symlinks are not followed (no cycles). Directories are listed
+ * alongside files with a trailing `/` so `@src/` is completable.
  */
 async function walk(root: string): Promise<string[]> {
   const files: string[] = []
@@ -66,10 +69,12 @@ async function walk(root: string): Promise<string[]> {
       // Uniform name check: prunes ignored directories before descending and
       // skips files named like one (a file literally called `build`).
       if (IGNORED_SEGMENTS.has(entry.name)) continue
+      const rel = relative(root, join(dir, entry.name))
       if (entry.isDirectory()) {
+        files.push(`${rel}/`)
         queue.push(join(dir, entry.name))
       } else if (entry.isFile()) {
-        files.push(relative(root, join(dir, entry.name)))
+        files.push(rel)
       }
     }
   }
@@ -100,7 +105,10 @@ export function fuzzyMatchPaths(query: string, candidates: readonly string[], li
 /** Score one candidate path against the query; null = no subsequence match.
  * Exported for tests. */
 export function scorePath(query: string, path: string): number | null {
-  const basename = path.slice(path.lastIndexOf('/') + 1)
+  // A directory's trailing `/` is presentation, not name: the basename is
+  // what follows it, so `ui` still bonuses `src/ui/`.
+  const trimmed = path.endsWith('/') ? path.slice(0, -1) : path
+  const basename = trimmed.slice(trimmed.lastIndexOf('/') + 1)
   let score = 0
   if (basename.startsWith(query)) score += 100
   else if (basename.includes(query)) score += 60

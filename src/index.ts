@@ -71,7 +71,7 @@ import { createCommandRunner } from './commands/index.js'
 import type { CommandCtx, SessionForkSeed } from './commands/types.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.28.0'
+export const FX_TUI_VERSION = '0.29.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000

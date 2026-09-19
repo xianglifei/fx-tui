@@ -311,7 +311,14 @@ export function InputBox(props: InputBoxProps): ReactElement {
       void listWorkspaceFiles(process.cwd()).then(files => {
         if (cancelled) return
         const rows: readonly MenuRow[] = fuzzyMatchPaths(query, files, MAX_FILE_MATCHES)
-          .map(match => ({ type: 'entry' as const, label: match.path, description: '', skill: false }))
+          .map(match => ({
+            type: 'entry' as const,
+            label: match.path,
+            // Directories carry a trailing `/` (walk convention); label it so
+            // the entry reads as a folder, and completion leaves it open-ended.
+            description: match.path.endsWith('/') ? '目录' : '',
+            skill: false,
+          }))
         if (rows.length === 0) {
           setMenu(null)
           return
@@ -654,8 +661,11 @@ export function InputBox(props: InputBoxProps): ReactElement {
       const before = chars.slice(0, current.col).join('')
       const at = before.lastIndexOf('@')
       if (at < 0) return current
-      const completed = `${line.slice(0, at)}@${label} ${line.slice(current.col)}`
-      return { lines: [...current.lines.slice(0, current.row), completed, ...current.lines.slice(current.row + 1)], row: current.row, col: at + label.length + 2 }
+      // A completed directory keeps no trailing space — the user continues
+      // into it (@src/ui/ + `Input` → @src/ui/Input); files get one.
+      const gap = label.endsWith('/') ? '' : ' '
+      const completed = `${line.slice(0, at)}@${label}${gap}${line.slice(current.col)}`
+      return { lines: [...current.lines.slice(0, current.row), completed, ...current.lines.slice(current.row + 1)], row: current.row, col: at + label.length + 1 + gap.length }
     })
   }
 
