@@ -77,7 +77,7 @@ async function renderInputBox(lines: readonly string[], row: number, col: number
   // dynamic region with an empty final write).
   instance.unmount()
   await new Promise(resolve => setTimeout(resolve, 50))
-  const last = frames.filter(frame => frame !== '').at(-1) ?? ''
+  const last = frames.findLast(frame => frame !== '') ?? ''
   return last
     .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
     .split('\n')

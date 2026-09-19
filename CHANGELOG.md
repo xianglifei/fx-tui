@@ -44,7 +44,9 @@ fork ink / alternate screen（同文档第一节），与 MiniMax Code 实证的
 pi-tui 路线同归。
 
 单元测试新增 `editorRowsForSpace` 预算性质（空间-菜单-总行数组合下
-box 恒不超预算）与 TC6 回归用例；套件 242 → 250 条。
+box 恒不超预算）与 TC6 回归用例；套件 242 → 250 条。CI verify 首跑
+揪出两条新测试的 oxlint 违例（条件式 expect、filter+at 模式），随即
+改为单断言计算式与 `findLast`。
 
 ## [0.25.0] - 2026-09-19
 

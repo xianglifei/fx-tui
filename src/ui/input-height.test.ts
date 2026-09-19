@@ -167,13 +167,13 @@ describe('editorRowsForSpace', () => {
           const visible = space(availableRows, total, menuRows)
           const indicator = total > visible ? 1 : 0
           const box = 2 + visible + indicator + menuRows
-          if (availableRows < menuRows + 5) {
-            // Degenerate: the chrome alone cannot fit — the clamp floors the
-            // editor at 1 row and the box legitimately overflows.
-            expect(visible).toBe(1)
-            continue
-          }
-          expect(box).toBeLessThanOrEqual(availableRows)
+          // Degenerate (chrome alone exceeds the space): the clamp floors the
+          // editor at 1 row and the box legitimately overflows.
+          const degenerate = availableRows < menuRows + 5
+          expect(
+            degenerate ? visible === 1 : box <= availableRows,
+            `rows=${availableRows} total=${total} menu=${menuRows}: visible=${visible} box=${box}`,
+          ).toBe(true)
         }
       }
     }
