@@ -108,11 +108,13 @@ export function App(props: AppProps): ReactElement {
   // exactly once — later frames re-measure everything themselves.
   const firstFrameRef = useRef(true)
 
-  // Elastic splash filler: blank rows between the settled transcript and the
-  // live region keep the frame at viewport height while the conversation is
-  // shorter than the screen — the banner stays pinned to the top edge and the
-  // input to the bottom row, and every new line consumes filler instead of
-  // scrolling (Claude Code's startup screen). Once the filler is exhausted the
+  // Elastic splash filler: blank rows keep the frame at viewport height while
+  // the conversation is shorter than the screen — the banner stays pinned to
+  // the top edge and the input to the bottom row, and every new line consumes
+  // filler instead of scrolling (Claude Code's startup screen). The filler
+  // renders BELOW the live content so streaming output grows downward from
+  // the transcript and settles in place; between the filler and the bottom
+  // there is only the pinned input block. Once the filler is exhausted the
   // app scrolls like a normal terminal transcript and the banner erodes into
   // scrollback line by line. Sizing errs on the small side: a short filler
   // only leaves a harmless gap above the status bar, while an oversized one
@@ -201,9 +203,6 @@ export function App(props: AppProps): ReactElement {
         )}
       </Static>
       <Box ref={liveRegionRef} flexDirection="column" marginRight={1}>
-        {filler > 0 && Array.from({ length: filler }, (_, index) => (
-          <Text key={`filler-${index}`}>{' '}</Text>
-        ))}
         {snap.pendingTools.length === 1 && <PendingToolView tool={snap.pendingTools[0]!} width={width} />}
         {snap.pendingTools.length > 1 && (
           // Codex's compact group display: parallel calls collapse to one
@@ -234,6 +233,9 @@ export function App(props: AppProps): ReactElement {
             )}
           </Box>
         )}
+        {filler > 0 && Array.from({ length: filler }, (_, index) => (
+          <Text key={`filler-${index}`}>{' '}</Text>
+        ))}
         <StatusBar
           phase={snap.phase}
           detail={snap.phaseDetail}
