@@ -58,6 +58,7 @@ import type { ToolPresenter } from './store.js'
 import { formatToolArgs } from './store.js'
 import { StatusLineWatcher } from './statusline.js'
 import { detectTerminalBackground } from './terminal-bg.js'
+import { printFarewell } from './farewell.js'
 import { InputHistory } from './history.js'
 import { NOTIFY_MIN_TURN_MS, notifyTurnComplete } from './notify.js'
 import { launchShellPassthrough, parseShellBang } from './shell-bang.js'
@@ -72,7 +73,7 @@ import { createCommandRunner } from './commands/index.js'
 import type { CommandCtx, SessionForkSeed } from './commands/types.js'
 import type { ToolResult } from '@deepseek-ai/dsh-tools'
 
-export const FX_TUI_VERSION = '0.32.0'
+export const FX_TUI_VERSION = '0.33.0'
 
 /** Idle window after launch before the one-shot background update check fires. */
 const AUTO_UPDATE_DELAY_MS = 120_000
@@ -559,7 +560,7 @@ async function main(ctx: Context, exit: (code: number) => void | Promise<void>):
     store.start()
   }
 
-async function shutdown(): Promise<void> {
+async function shutdown(opts?: { respawn?: boolean }): Promise<void> {
   detachResizeRebuild()
   statusLineWatcher.dispose()
   instance?.unmount()
@@ -576,6 +577,9 @@ async function shutdown(): Promise<void> {
   } catch {
     // flushing on exit is best-effort
   }
+  // A respawn hands the live terminal straight to the child; only a real
+  // exit trades the on-screen transcript for the clean-slate farewell.
+  if (opts?.respawn !== true) printFarewell(agent.session.id, FX_TUI_VERSION)
   await exit(0)
 }
 
@@ -603,7 +607,7 @@ async function restartAndResume(): Promise<void> {
     return
   }
   child.unref()
-  await shutdown()
+  await shutdown({ respawn: true })
 }
 
 /**

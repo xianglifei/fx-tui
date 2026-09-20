@@ -63,6 +63,8 @@ fx --resume <id>                    # 恢复会话
   一屏时新消息先消耗空白，横幅钉在顶缘、输入框钉底、零滚动（Claude Code 式）；
   内容超屏后自然滚动、横幅逐行滚入 scrollback。窄终端自动降级（先截断值、再隐藏 logo）
 - **滚动式聊天界面**：主屏保留终端 scrollback，历史可搜索、可复制
+- **退出即净屏**：退出时自动清屏并打印 `fx --resume <id>` 恢复提示
+  （`/restart` 重生除外），终端不留对话残留，Claude Code 式干净收尾
 - **流式 Markdown 渲染**：代码高亮（cli-highlight）、CJK 感知换行（wrap-ansi）
 - **复制回复**：`/copy` 把最后一条助手回复的 Markdown 原文复制到剪贴板
   （流式进行中取当前已生成部分）
