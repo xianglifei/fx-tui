@@ -53,6 +53,19 @@ export interface ToolItem {
 export interface NoticeItem { readonly kind: 'notice'; readonly text: string; readonly tone: 'info' | 'error' | 'warn' }
 export interface PanelItem { readonly kind: 'panel'; readonly title: string; readonly lines: readonly string[] }
 
+/**
+ * Settled reasoning of one step, inline-expanded（Ctrl+T 展开态）: header +
+ * body capped at THINKING_INLINE_LINE_CAP lines. `chars` is the step's full
+ * reasoning length; `truncated` marks a body that shows only part of it.
+ */
+export interface ThinkingItem {
+  readonly kind: 'thinking'
+  readonly text: string
+  readonly chars: number
+  readonly durationMs: number
+  readonly truncated: boolean
+}
+
 /** Splash box shown once at the top of a fresh transcript (startup facts). */
 export interface BannerItem {
   readonly kind: 'banner'
@@ -63,7 +76,7 @@ export interface BannerItem {
   readonly cwd: string
   readonly resumed: boolean
 }
-export type FinalItem = UserItem | AssistantItem | ToolItem | NoticeItem | PanelItem | BannerItem
+export type FinalItem = UserItem | AssistantItem | ToolItem | NoticeItem | PanelItem | BannerItem | ThinkingItem
 
 export interface PendingTool {
   readonly callId: string
@@ -149,6 +162,11 @@ export interface Snapshot {
   readonly phaseDetail: string
   readonly usage: string
   readonly reasoningChars: number
+  /** Live reasoning buffer（思考全文，封顶截断）+ measured duration, for the
+   * expanded live tail（Ctrl+T）. */
+  readonly reasoningText: string
+  readonly reasoningDurationMs: number
+  readonly thinkingExpanded: boolean
   readonly approval: ApprovalPrompt | null
   readonly question: ActiveQuestion | null
   readonly questionFreeText: boolean
@@ -181,6 +199,11 @@ export interface ToolPresenter {
 const FLUSH_INTERVAL_MS = 60
 const EXIT_ARM_MS = 2500
 const RESULT_PREVIEW_LIMIT = 800
+/** Hard cap of the retained reasoning text（head-anchored）: bounds memory
+ * and the Ctrl+T panel; the char count keeps counting past it. */
+const REASONING_TEXT_CAP = 100_000
+/** Inline body lines of a settled, expanded thinking block. */
+const THINKING_INLINE_LINE_CAP = 40
 
 export class TuiStore {
   private items: FinalItem[] = []
@@ -199,7 +222,12 @@ export class TuiStore {
   private phaseDetail = ''
   private usage = ''
   private reasoningChars = 0
-  private reasoningHead = ''
+  private reasoningText = ''
+  private reasoningDirty = false
+  private thinkingExpanded = false
+  /** Full（capped）text of the most recent settled reasoning, for the idle
+   * Ctrl+T detail panel; null before the first settled step of the session. */
+  private lastReasoning: { text: string; chars: number; durationMs: number } | null = null
   private reasoningStartMs: number | null = null
   private reasoningLastMs: number | null = null
   private readonly approvals: ApprovalBridge
@@ -274,6 +302,11 @@ export class TuiStore {
       phaseDetail: this.phaseDetail,
       usage: this.usage,
       reasoningChars: this.reasoningChars,
+      reasoningText: this.reasoningText,
+      reasoningDurationMs: this.reasoningLastMs !== null && this.reasoningStartMs !== null
+        ? Math.max(0, this.reasoningLastMs - this.reasoningStartMs)
+        : 0,
+      thinkingExpanded: this.thinkingExpanded,
       approval: this.approvals.current,
       question,
       questionFreeText: question !== null && (question.item.options ?? []).length === 0,
@@ -316,9 +349,15 @@ export class TuiStore {
   }
 
   private flushStream(): void {
-    if (this.streamBuf === '') return
-    this.streamText += this.streamBuf
-    this.streamBuf = ''
+    // Reasoning deltas set reasoningDirty: without this branch a pure-thinking
+    // phase (no text in streamBuf) would never commit, and the live tail and
+    // the status bar's char count would freeze until the step settles.
+    if (this.streamBuf === '' && !this.reasoningDirty) return
+    if (this.streamBuf !== '') {
+      this.streamText += this.streamBuf
+      this.streamBuf = ''
+    }
+    this.reasoningDirty = false
     this.commit()
   }
 
@@ -374,9 +413,11 @@ export class TuiStore {
         this.streamBuf = ''
         this.streamText = ''
         const text = blocksToText(ev.data.message.content)
-        // A settled one-line record of this step's reasoning (replays never
-        // saw the deltas, so replayed transcripts simply omit it).
-        const thinking = this.reasoningNotice()
+        // A settled record of this step's reasoning. Live deltas carry the
+        // measured duration; a replayed message contributes only its
+        // reasoning blocks (sessions persisted before this feature simply
+        // have none, and settle nothing — same as before).
+        const thinking = this.settledThinking(blocksToReasoningText(ev.data.message.content))
         if (thinking !== null) this.items.push(thinking)
         // Tool-only rounds carry no text: the message that holds the tool_use
         // blocks would otherwise become a blank transcript item rendering two
@@ -488,6 +529,10 @@ export class TuiStore {
       }
       case 'turn/end': {
         this.finalizeStream(ev.data.reason.kind === 'aborted')
+        // An abort mid-reasoning never reaches assistant/message; keep the
+        // partial text for the Ctrl+T panel (no transcript item — nothing
+        // settled to show inline).
+        this.stashReasoning()
         this.phase = 'idle'
         this.phaseDetail = ''
         this.retryWait = null
@@ -544,7 +589,12 @@ export class TuiStore {
       if (this.reasoningStartMs === null) this.reasoningStartMs = frame.time
       this.reasoningLastMs = frame.time
       this.reasoningChars += chunk.text.length
-      if (this.reasoningHead.length < 200) this.reasoningHead += chunk.text
+      // Full text for the live tail and the Ctrl+T panel, head-anchored at
+      // the cap; the char count keeps counting past it.
+      if (this.reasoningText.length < REASONING_TEXT_CAP) {
+        this.reasoningText = `${this.reasoningText}${chunk.text}`.slice(0, REASONING_TEXT_CAP)
+      }
+      this.reasoningDirty = true
     }
   }
 
@@ -586,27 +636,85 @@ export class TuiStore {
 
   private resetReasoning(): void {
     this.reasoningChars = 0
-    this.reasoningHead = ''
+    this.reasoningText = ''
     this.reasoningStartMs = null
     this.reasoningLastMs = null
   }
 
-  /** Settled one-line record of the step's reasoning: first line as summary +
-   * live-measured thinking duration. null when the step reasoned nothing. */
-  private reasoningNotice(): NoticeItem | null {
-    if (this.reasoningChars <= 0) return null
-    const firstLine = this.reasoningHead.split('\n').map(line => line.trim()).find(line => line !== '')
-    const summary = firstLine !== undefined
-      ? truncateLine(firstLine, 60)
-      : `${this.reasoningChars} 字`
+  /** Remember the in-flight reasoning as the panel target（Ctrl+T）; a no-op
+   * when the step reasoned nothing. */
+  private stashReasoning(): void {
+    if (this.reasoningChars <= 0 || this.reasoningText === '') return
+    this.lastReasoning = {
+      text: this.reasoningText,
+      chars: this.reasoningChars,
+      durationMs: this.reasoningStartMs !== null && this.reasoningLastMs !== null
+        ? Math.max(0, this.reasoningLastMs - this.reasoningStartMs)
+        : 0,
+    }
+  }
+
+  /** Settled transcript record of the step's reasoning: the one-line summary
+   * notice in collapsed mode, the inline body block in expanded mode
+   * （Ctrl+T）. Stashes the full text for the idle detail panel either way.
+   * `replayText` backs the record when no live deltas were seen (resumed
+   * sessions); it carries no duration. */
+  private settledThinking(replayText: string): FinalItem | null {
+    this.stashReasoning()
+    const chars = this.reasoningChars > 0 ? this.reasoningChars : replayText.length
+    if (chars <= 0) return null
+    const text = this.reasoningChars > 0 ? this.reasoningText : replayText
     const durationMs = this.reasoningStartMs !== null && this.reasoningLastMs !== null
       ? Math.max(0, this.reasoningLastMs - this.reasoningStartMs)
       : 0
-    return {
-      kind: 'notice',
-      tone: 'info',
-      text: `✻ 思考：${summary} · ${formatElapsed(durationMs)}`,
+    if (!this.thinkingExpanded) {
+      const firstLine = text.split('\n').map(line => line.trim()).find(line => line !== '')
+      const summary = firstLine !== undefined ? truncateLine(firstLine, 60) : `${chars} 字`
+      return { kind: 'notice', tone: 'info', text: `✻ 思考：${summary} · ${formatElapsed(durationMs)}` }
     }
+    const lines = text.trimStart().split('\n')
+    const shown = lines.slice(0, THINKING_INLINE_LINE_CAP)
+    return {
+      kind: 'thinking',
+      text: shown.join('\n').trim() === '' ? '' : shown.join('\n'),
+      chars,
+      durationMs,
+      truncated: lines.length > THINKING_INLINE_LINE_CAP || text.length >= REASONING_TEXT_CAP,
+    }
+  }
+
+  /** Toggle the thinking display（Ctrl+T）: expanded shows the live reasoning
+   * tail while it streams and settles later steps as inline blocks; collapsing
+   * is silent — the visible change is its own feedback. Expanding while no
+   * reasoning is in flight prints the last settled step's full text as a
+   * panel: Static rows cannot re-render, so like Ctrl+O the reveal for
+   * already-settled content is a one-shot print. */
+  toggleThinking(): boolean {
+    this.thinkingExpanded = !this.thinkingExpanded
+    if (this.thinkingExpanded) {
+      if (this.reasoningChars > 0 && this.phase === 'thinking') this.commit()
+      else if (this.lastReasoning !== null) this.emitLastThinkingDetail()
+      else this.addNotice('当前没有可展示的思考内容（仅记录本次会话运行中产生的思考）')
+    } else {
+      this.commit()
+    }
+    return this.thinkingExpanded
+  }
+
+  /** Full text of the last settled step's reasoning as a bordered panel,
+   * viewport-capped like the Ctrl+O tool detail and head-anchored — the
+   * common want is how the model started thinking, and the summary notice
+   * already carries the first line. */
+  private emitLastThinkingDetail(): void {
+    const last = this.lastReasoning
+    if (last === null) return
+    const lines = last.text.trimStart().split('\n')
+    const cap = Math.max(10, (process.stdout.rows ?? 40) - 12)
+    const shown = lines.slice(0, cap)
+    this.addPanel(`思考全文 · ${formatCount(last.chars)} 字 · ${formatElapsed(last.durationMs)}`, [
+      ...shown,
+      ...(lines.length > shown.length ? [`…（还有 ${lines.length - shown.length} 行未显示）`] : []),
+    ])
   }
 
   // -- Local actions -------------------------------------------------------
@@ -670,6 +778,8 @@ export class TuiStore {
     this.phase = 'idle'
     this.phaseDetail = ''
     this.usage = ''
+    this.lastReasoning = null
+    this.thinkingExpanded = false
     this.resetReasoning()
     this.effortLabel = ''
     this.lastUsage = null
@@ -878,18 +988,23 @@ export class TuiStore {
    * restyle already-settled cards; instead, switching to full detail prints
    * the latest tool call's complete output as a panel — the common want is
    * the full text of what was just truncated. Bounded by the viewport so the
-   * panel itself never becomes an over-viewport Static item. */
+   * panel itself never becomes an over-viewport Static item. Terminal cards
+   * lead with the full command: their compact header truncates it, so this
+   * panel is the only place the raw text survives. */
   private emitLastToolDetail(): void {
     let i = this.items.length - 1
     while (i >= 0 && this.items[i]!.kind === 'notice') i--
     const item = this.items[i]
     if (item === undefined || item.kind !== 'tool') return
-    const lines = item.result.split('\n')
+    const view = item.view
+    const command = view !== undefined && view.card === 'terminal' ? (view.title ?? item.title) : undefined
+    const output = view !== undefined && view.card === 'terminal' && view.output !== undefined ? view.output : item.result
+    const body = command !== undefined ? [command, '', ...output.split('\n')] : output.split('\n')
     const cap = Math.max(10, (process.stdout.rows ?? 40) - 12)
-    const shown = lines.slice(0, cap)
-    this.addPanel(`工具详情 · ${item.title}`, [
+    const shown = body.slice(0, cap)
+    this.addPanel(`工具详情 · ${truncateLine(item.title, 60)}`, [
       ...shown,
-      ...(lines.length > shown.length ? [`…（还有 ${lines.length - shown.length} 行未显示）`] : []),
+      ...(body.length > shown.length ? [`…（还有 ${body.length - shown.length} 行未显示）`] : []),
     ])
   }
 
@@ -1021,6 +1136,16 @@ function blocksToText(content: readonly ContentBlock[]): string {
   let text = ''
   for (const block of content) {
     if (block.type === 'text') text += block.text
+  }
+  return text
+}
+
+/** Reasoning content of a persisted assistant message — the replay-side
+ * substitute for live reasoning deltas, which never ride session events. */
+function blocksToReasoningText(content: readonly ContentBlock[]): string {
+  let text = ''
+  for (const block of content) {
+    if (block.type === 'reasoning') text += block.text
   }
   return text
 }

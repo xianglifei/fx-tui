@@ -25,7 +25,7 @@ import type { EditorState, MenuEntry } from './Input.js'
 import { renderFileDiffs } from '../diff.js'
 import { renderMarkdownLines } from '../markdown.js'
 import { BANNER_BOX_HEIGHT, WelcomeBanner } from './Banner.js'
-import { estimateApprovalHeight, estimateItemHeight, estimateQuestionHeight, formatElapsed, headTailPreview, questionHintText, questionOptionRow, truncateLine, userBarRows } from './estimate.js'
+import { estimateApprovalHeight, estimateItemHeight, estimateQuestionHeight, formatCount, formatElapsed, headTailPreview, questionHintText, questionOptionRow, terminalHeaderCommand, thinkingHeaderOf, thinkingTailRows, truncateLine, userBarRows } from './estimate.js'
 import { computeInputHeight, countEditorRows, editorRowsForSpace, FREE_TEXT_HINT, imageTrayRows, MENU_PANE_ROWS, outputTrayRows, seedToState } from './Input.js'
 import { textRows } from './ink-text.js'
 import { InputBox } from './Input.js'
@@ -129,6 +129,10 @@ export function App(props: AppProps): ReactElement {
   // StreamView: computing it twice doubled the streaming cost of every
   // 60ms token flush on long replies.
   const streamingLines = snap.streaming !== '' ? renderMarkdownLines(snap.streaming, width) : []
+  // Live thinking view（Ctrl+T）: one dim hint row while reasoning streams in
+  // collapsed mode, header + tail rows in expanded mode. Computed once per
+  // frame and shared with the fixed-live budget, like streamingLines.
+  const thinkingLive = buildThinkingLive(snap as Snapshot, liveColumns)
   // Same-commit input budget: the settled transcript and every live-region
   // row the input shares the viewport with are computed HERE, the editor's
   // visible rows are carved out of what remains (splash keeps the banner
@@ -138,7 +142,7 @@ export function App(props: AppProps): ReactElement {
   // the input (0.13.0's "menu over tall draft" family, unfixable while the
   // editor cap ignored its surroundings).
   const settledHeight = computeSettledHeight(snap as Snapshot, width, termColumns)
-  const fixedLive = computeFixedLive(snap as Snapshot, width, liveColumns, streamingLines)
+  const fixedLive = computeFixedLive(snap as Snapshot, width, liveColumns, streamingLines, thinkingLive)
   const splashPhase = rows !== undefined &&
     BANNER_BOX_HEIGHT + settledHeight + fixedLive + MIN_INPUT_BOX_ROWS <= rows
   const availableRows = rows === undefined
@@ -208,6 +212,14 @@ export function App(props: AppProps): ReactElement {
           // Codex's compact group display: parallel calls collapse to one
           // running line; each settles into its own card on completion.
           <Text color={theme.warning}>{truncateLine(`⚙ 并行运行 ${snap.pendingTools.length} 个工具…`, liveColumns)}</Text>
+        )}
+        {thinkingLive !== null && (
+          <Box flexDirection="column">
+            <Text color={theme.muted} dimColor>{thinkingLive.header}</Text>
+            {thinkingLive.rows.map((line, i) => (
+              <Text key={i} color={theme.muted} dimColor>{`  ${line === '' ? ' ' : line}`}</Text>
+            ))}
+          </Box>
         )}
         {snap.streaming !== '' && <StreamView lines={streamingLines} />}
         {snap.approval !== null && <ApprovalView store={props.store} prompt={snap.approval} />}
@@ -338,6 +350,19 @@ function FinalItemView(props: { item: FinalItem; width: number; columns: number 
           {`${item.tone === 'error' ? '✗ ' : item.tone === 'warn' ? '⚠ ' : '· '}${item.text}`}
         </Text>
       )
+    case 'thinking':
+      // Muted inline body of the step's reasoning（Ctrl+T 展开态 settle）；
+      // height mirrored by estimate.ts's 'thinking' case.
+      return (
+        <Box flexDirection="column">
+          <LeadGap />
+          <Text color={theme.muted} dimColor>{thinkingHeaderOf(item)}</Text>
+          {item.text !== '' && item.text.split('\n').map((line, i) => (
+            <Text key={i} color={theme.muted} dimColor>{`  ${line === '' ? ' ' : line}`}</Text>
+          ))}
+          {item.truncated && <Text color={theme.muted} dimColor>…（还有更多，Ctrl+T 看全文）</Text>}
+        </Box>
+      )
     case 'panel':
       return (
         <Box flexDirection="column" borderStyle="round" borderColor={theme.accent} paddingX={1}>
@@ -356,6 +381,29 @@ function PendingToolView(props: { tool: PendingTool; width: number }): ReactElem
   return (
     <Text color={theme.warning}>{`⚙ ${truncateLine(props.tool.title, props.width - 10)} 运行中…`}</Text>
   )
+}
+
+interface ThinkingLive {
+  header: string
+  rows: readonly string[]
+}
+
+/** The live-region thinking view for this frame, or null when hidden:
+ * collapsed mode shows the one-row hint only while reasoning is actually
+ * streaming in（the same condition the status bar's char count uses）; the
+ * expanded mode swaps the hint for a header + tail view of the buffer. */
+function buildThinkingLive(snap: Snapshot, columns: number): ThinkingLive | null {
+  if (snap.phase !== 'thinking' || snap.reasoningChars <= 0) return null
+  if (!snap.thinkingExpanded) {
+    return { header: truncateLine('✻ 思考中…（Ctrl+T 展开思考）', columns), rows: [] }
+  }
+  return {
+    header: truncateLine(
+      `✻ 思考中 · ${formatCount(snap.reasoningChars)} 字 · ${formatElapsed(snap.reasoningDurationMs)}（Ctrl+T 收起）`,
+      columns,
+    ),
+    rows: thinkingTailRows(snap.reasoningText, columns),
+  }
 }
 
 /** Compact tool card (Codex-style): one status header line plus indented dim
@@ -390,24 +438,43 @@ function ToolCardView(props: { item: ToolItem; columns: number }): ReactElement 
   }
 
   if (view !== undefined && view.card === 'terminal') {
+    // A non-zero exit keeps the green success color but flips the glyph —
+    // the command "ran", the result failed.
+    const exitGlyph = item.ok && item.exitCode !== 1 ? '✓' : '✗'
     const status = item.exitCode !== undefined
       ? (item.exitCode === 0 ? 'exit 0' : `exit ${item.exitCode}`)
       : item.signal !== undefined ? item.signal : ''
     const output = view.output ?? item.result
-    const { shown, hidden } = headTailPreview(output.split('\n'), item.verbose ? 400 : 5)
-    // A non-zero exit keeps the green success color but flips the glyph —
-    // the command "ran", the result failed.
-    const exitGlyph = item.ok && item.exitCode !== 1 ? '✓' : '✗'
+    const lines = output.split('\n')
+    const hasOutput = !(lines.length === 1 && lines[0] === '')
+    // Compact card（ZCode-style）: the raw command wrapped across dozens of
+    // rows, so the header truncates it to one row and the output hides
+    // entirely — both live in the Ctrl+O detail panel. Full-detail mode
+    // (Ctrl+O toggled before this card settled) keeps the head+tail preview.
+    const suffix = `· ${elapsed}${status !== '' ? ` · ${status}` : ''}`
+    const command = terminalHeaderCommand(view.title ?? item.title, suffix, columns)
+    const header = (
+      <Text color={color}>
+        {`${exitGlyph} ${command} `}
+        <Text dimColor>{suffix}</Text>
+      </Text>
+    )
+    if (item.verbose) {
+      const { shown, hidden } = headTailPreview(lines, 400)
+      return (
+        <Box flexDirection="column">
+          {header}
+          {shown.map((line, i) => (
+            <Text key={i} dimColor>{`${indent}${truncateLine(line, columns - 2)}`}</Text>
+          ))}
+          {hidden > 0 && <Text dimColor>{`…（还有 ${hidden} 行，Ctrl+O 切换完整显示）`}</Text>}
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="column">
-        <Text color={color}>
-          {`${exitGlyph} ${view.title ?? item.title} `}
-          <Text dimColor>{`· ${elapsed}${status !== '' ? ` · ${status}` : ''}`}</Text>
-        </Text>
-        {shown.map((line, i) => (
-          <Text key={i} dimColor>{`${indent}${truncateLine(line, columns - 2)}`}</Text>
-        ))}
-        {hidden > 0 && <Text dimColor>{`…（还有 ${hidden} 行，Ctrl+O 切换完整显示）`}</Text>}
+        {header}
+        {hasOutput && <Text dimColor>{`  输出 ${lines.length} 行（Ctrl+O 查看全文）`}</Text>}
       </Box>
     )
   }
@@ -711,8 +778,10 @@ function computeFixedLive(
   width: number,
   liveColumns: number,
   streamingLines: readonly string[],
+  thinkingLive: ThinkingLive | null,
 ): number {
   return (streamingLines.length > 0 ? streamingLines.length + 1 : 0) + // reply + lead gap
+    (thinkingLive !== null ? 1 + thinkingLive.rows.length : 0) + // thinking hint or header + tail rows
     (snap.pendingTools.length > 0 ? 1 : 0) + // one line, even for parallel calls
     (snap.approval !== null ? estimateApprovalHeight(snap.approval, liveColumns) : 0) +
     (snap.question !== null ? estimateQuestionHeight(snap.question, width, liveColumns) : 0) +

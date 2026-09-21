@@ -3,6 +3,10 @@ import type { ActiveQuestion, FinalItem } from '../store.js'
 import { QUESTION_WINDOW } from '../store.js'
 import {
   APPROVAL_CHOICES_TEXT,
+  THINKING_TAIL_ROWS,
+  terminalHeaderCommand,
+  thinkingHeaderOf,
+  thinkingTailRows,
   estimateApprovalHeight,
   estimateItemHeight,
   estimateQuestionHeight,
@@ -132,5 +136,73 @@ describe('formatElapsed', () => {
     expect(formatElapsed(50)).toBe('50ms')
     expect(formatElapsed(1500)).toBe('1.5s')
     expect(formatElapsed(65_000)).toBe('1m5s')
+  })
+})
+
+describe('thinking rows（Ctrl+T）', () => {
+  const thinkingItem = (over: Partial<Extract<FinalItem, { kind: 'thinking' }>> = {}): FinalItem => ({
+    kind: 'thinking', text: 'a\nb', chars: 3, durationMs: 1200, truncated: false, ...over,
+  })
+
+  it('header is shared verbatim between view and estimator', () => {
+    expect(thinkingHeaderOf({ chars: 1234, durationMs: 5000 })).toBe('✻ 思考 · 5.0s · 1.2k 字')
+    expect(thinkingHeaderOf({ chars: 0, durationMs: 40 })).toBe('✻ 思考 · 40ms')
+  })
+
+  it('thinkingTailRows keeps the last window and wraps CJK to width', () => {
+    const many = Array.from({ length: 20 }, (_, i) => `行${i}`).join('\n')
+    const rows = thinkingTailRows(many, 80)
+    expect(rows).toHaveLength(THINKING_TAIL_ROWS)
+    expect(rows.at(-1)).toBe('行19')
+
+    const wide = '思'.repeat(200)
+    for (const row of thinkingTailRows(wide, 40)) {
+      expect(row.length).toBeLessThanOrEqual(40)
+    }
+  })
+
+  it('thinkingTailRows of empty text is empty (hidden tail)', () => {
+    expect(thinkingTailRows('', 80)).toEqual([])
+  })
+
+  it('settled thinking block: lead gap + header + body rows (+ marker)', () => {
+    expect(estimateItemHeight(thinkingItem(), 78, 80)).toBe(4)
+    expect(estimateItemHeight(thinkingItem({ truncated: true }), 78, 80)).toBe(5)
+    expect(estimateItemHeight(thinkingItem({ text: '' }), 78, 80)).toBe(2)
+  })
+})
+
+describe('terminal card compact header', () => {
+  const terminalCard = (over: Record<string, unknown> = {}): FinalItem => ({
+    kind: 'tool', name: 'bash', title: 'run', args: '', ok: true, result: '',
+    elapsedMs: 52, exitCode: 0, verbose: false,
+    view: { card: 'terminal', title: 'echo hi', output: 'out1\nout2\nout3' },
+    ...over,
+  } as unknown as FinalItem)
+
+  it('terminalHeaderCommand truncates long commands into the one-row budget', () => {
+    const suffix = '· 52ms · exit 0'
+    expect(terminalHeaderCommand('echo hi', suffix, 80)).toBe('echo hi')
+    const long = 'echo "' + '思'.repeat(120) + '"'
+    const trimmed = terminalHeaderCommand(long, suffix, 80)
+    expect(trimmed.startsWith('echo "思')).toBe(true)
+    expect(trimmed.endsWith('…')).toBe(true)
+    // `✓ ` prefix + command + space + suffix must fit the row exactly.
+    expect(trimmed.length + suffix.length + 3).toBeLessThanOrEqual(80)
+  })
+
+  it('compact card: header + output-count marker (no output → header alone)', () => {
+    expect(estimateItemHeight(terminalCard(), 78, 80)).toBe(3) // lead gap + header + marker
+    expect(estimateItemHeight(terminalCard({ view: { card: 'terminal', title: 'cd /tmp', output: '' } }), 78, 80)).toBe(2)
+  })
+
+  it('a command that used to wrap dozens of rows now costs one', () => {
+    const long = 'echo "' + '思'.repeat(200) + '"'
+    expect(estimateItemHeight(terminalCard({ view: { card: 'terminal', title: long, output: 'x' } }), 78, 80)).toBe(3)
+  })
+
+  it('verbose mode keeps the head+tail preview budget', () => {
+    const lines = Array.from({ length: 5 }, (_, i) => `l${i}`).join('\n')
+    expect(estimateItemHeight(terminalCard({ verbose: true, view: { card: 'terminal', title: 'echo hi', output: lines } }), 78, 80)).toBe(7)
   })
 })

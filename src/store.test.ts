@@ -1,3 +1,4 @@
+import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { describe, expect, it } from 'vitest'
 import { TuiStore } from './store.js'
@@ -225,3 +226,192 @@ describe('TuiStore echoUser with ride-along trays', () => {
   })
 })
 
+
+// -- Thinking（Ctrl+T）---------------------------------------------------------
+
+const reasoningChunk = (text: string, time: number): AssistantStreamFrame =>
+  ({ type: 'chunk', time, chunk: { type: 'reasoning-delta', index: 0, text } } as unknown as AssistantStreamFrame)
+
+/** assistant/message settles the step: the thinking record lands first, the
+ * visible reply last — assertions address them as at(-2) / at(-1). */
+const settleStep = (store: TuiStore, time = 2): void => {
+  store.onEvent(ev('assistant/message', { message: { content: [{ type: 'text', text: 'hello' }] }, interrupted: false }, time))
+}
+
+/** A committing no-op event: onAssistantStreamFrame never commits, so the
+ * snapshot only reflects reasoning state after some event lands. */
+const commitTick = (store: TuiStore): void => {
+  store.onEvent(ev('request/context', {}, 999))
+}
+
+describe('TuiStore thinking settle (collapsed default)', () => {
+  it('settles the one-line summary notice before the reply', () => {
+    const store = new TuiStore('s1', 'model')
+    store.onEvent(TURN_START)
+    store.onAssistantStreamFrame(reasoningChunk('第一行思考\n第二行思考', 10))
+    store.onAssistantStreamFrame(reasoningChunk('收尾', 60))
+    settleStep(store, 110)
+
+    expect(store.getSnapshot().items.at(-2)).toMatchObject({ kind: 'notice', text: '✻ 思考：第一行思考 · 50ms' })
+    expect(store.getSnapshot().items.at(-1)).toMatchObject({ kind: 'assistant' })
+  })
+
+  it('flushes reasoning progress so the live tail and char count tick', async () => {
+    const store = new TuiStore('s1', 'model')
+    store.start()
+    store.onEvent(TURN_START)
+    store.onAssistantStreamFrame(reasoningChunk('思考中', 10))
+    // The flush interval runs on a real timer; poll briefly instead of
+    // importing fake timers for one assertion.
+    const deadline = Date.now() + 2000
+    while (store.getSnapshot().reasoningChars === 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    store.dispose()
+    expect(store.getSnapshot().reasoningChars).toBeGreaterThan(0)
+  })
+})
+
+describe('TuiStore thinking expanded (Ctrl+T)', () => {
+  it('expands: settle emits an inline thinking block, capped at 40 lines', () => {
+    const store = new TuiStore('s1', 'model')
+    store.onEvent(TURN_START)
+    store.toggleThinking() // expand before any reasoning exists → notice, no content
+    expect(store.getSnapshot().thinkingExpanded).toBe(true)
+
+    store.onAssistantStreamFrame(reasoningChunk(Array.from({ length: 45 }, (_, i) => `行${i}`).join('\n'), 10))
+    store.onAssistantStreamFrame(reasoningChunk('收尾', 60))
+    settleStep(store, 110)
+
+    const item = store.getSnapshot().items.at(-2)
+    expect(item?.kind).toBe('thinking')
+    const thinking = item as Extract<NonNullable<typeof item>, { kind: 'thinking' }>
+    expect(thinking.text.split('\n')).toHaveLength(40)
+    expect(thinking.text).toContain('行0')
+    expect(thinking.chars).toBeGreaterThan(0)
+    expect(thinking.durationMs).toBe(50)
+    expect(thinking.truncated).toBe(true)
+  })
+
+  it('collapses silently: no extra notice, next settle is a one-line notice again', () => {
+    const store = new TuiStore('s1', 'model')
+    store.onEvent(TURN_START)
+    store.onAssistantStreamFrame(reasoningChunk('想想', 10))
+    settleStep(store)
+
+    const before = store.getSnapshot().items.length
+    expect(store.toggleThinking()).toBe(true)
+    expect(store.getSnapshot().items.length).toBe(before + 1) // the full-text panel
+    expect(store.getSnapshot().items.at(-1)).toMatchObject({ kind: 'panel' })
+    expect(store.toggleThinking()).toBe(false)
+    expect(store.getSnapshot().items.length).toBe(before + 1) // silent collapse
+
+    store.onEvent(TURN_START)
+    store.onAssistantStreamFrame(reasoningChunk('再想想', 10))
+    settleStep(store)
+    expect(store.getSnapshot().items.at(-2)).toMatchObject({ kind: 'notice' })
+    expect(store.getSnapshot().items.at(-1)).toMatchObject({ kind: 'assistant' })
+  })
+
+  it('idle expand prints the last settled reasoning as a full-text panel', () => {
+    const store = new TuiStore('s1', 'model')
+    store.onEvent(TURN_START)
+    store.onAssistantStreamFrame(reasoningChunk('第一步的思考', 10))
+    settleStep(store)
+    store.onEvent(TURN_END)
+
+    store.toggleThinking()
+    const panel = store.getSnapshot().items.at(-1)
+    expect(panel).toMatchObject({ kind: 'panel' })
+    expect(panel?.kind === 'panel' && panel.lines[0]).toBe('第一步的思考')
+    expect(panel?.kind === 'panel' && panel.title).toContain('思考全文')
+  })
+
+  it('idle expand with no recorded reasoning announces the gap', () => {
+    const store = new TuiStore('s1', 'model')
+    store.toggleThinking()
+    expect(store.getSnapshot().items.at(-1)).toMatchObject({ kind: 'notice' })
+  })
+})
+
+describe('TuiStore thinking cap and replay', () => {
+  it('caps the retained text at 100k chars while the count keeps rising', () => {
+    const store = new TuiStore('s1', 'model')
+    store.onEvent(TURN_START)
+    store.onAssistantStreamFrame(reasoningChunk('a'.repeat(60_000), 10))
+    store.onAssistantStreamFrame(reasoningChunk('b'.repeat(60_000), 20))
+    commitTick(store)
+
+    expect(store.getSnapshot().reasoningText).toHaveLength(100_000)
+    expect(store.getSnapshot().reasoningChars).toBe(120_000)
+  })
+
+  it('replays reasoning blocks from the persisted message (no duration)', () => {
+    const store = new TuiStore('s1', 'model')
+    store.replay([
+      ev('assistant/message', {
+        message: { content: [{ type: 'reasoning', text: '回想一下…\n再想想' }, { type: 'text', text: '答案' }] },
+        interrupted: false,
+      }, 2),
+    ])
+    store.finishReplay()
+
+    expect(store.getSnapshot().items.at(-2)).toMatchObject({ kind: 'notice', text: '✻ 思考：回想一下… · 0ms' })
+    expect(store.getSnapshot().items.at(-1)).toMatchObject({ kind: 'assistant' })
+    expect(store.getSnapshot().items.map(entry => entry.kind)).not.toContain('thinking')
+  })
+
+  it('expanded mode settles replayed reasoning blocks inline too', () => {
+    const resumed = new TuiStore('s2', 'model')
+    resumed.toggleThinking()
+    resumed.replay([
+      ev('assistant/message', {
+        message: { content: [{ type: 'reasoning', text: '回放的思考' }, { type: 'text', text: '答案' }] },
+        interrupted: false,
+      }, 2),
+    ])
+    resumed.finishReplay()
+
+    expect(resumed.getSnapshot().items.at(-2)).toMatchObject({
+      kind: 'thinking', text: '回放的思考', durationMs: 0, truncated: false,
+    })
+  })
+})
+
+describe('TuiStore tool detail panel (Ctrl+O)', () => {
+  const terminalPresenter = {
+    presentCall: () => undefined,
+    presentResult: () => ({ card: 'terminal', title: 'echo hi', output: 'out1\nout2', exitCode: 0 }) as const,
+  }
+
+  const runTerminalCard = (presenter: typeof terminalPresenter): TuiStore => {
+    const store = new TuiStore('s1', 'model', presenter)
+    store.onEvent(ev('tool/call', { callId: 'c1', name: 'bash', arguments: '{"command":"echo hi"}' }, 1))
+    store.onEvent(ev('tool/result', {
+      message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'x' }] }] },
+    }, 2))
+    return store
+  }
+
+  it('leads the panel with the full command, then a blank line, then the output', () => {
+    const store = runTerminalCard(terminalPresenter)
+    store.toggleVerboseToolDetail()
+
+    const panel = store.getSnapshot().items.at(-1)
+    expect(panel?.kind).toBe('panel')
+    expect(panel?.kind === 'panel' && panel.lines.slice(0, 3)).toEqual(['echo hi', '', 'out1'])
+    expect(panel?.kind === 'panel' && panel.title).toBe('工具详情 · echo hi')
+  })
+
+  it('non-terminal cards keep output-only panels', () => {
+    const store = new TuiStore('s1', 'model')
+    store.onEvent(ev('tool/call', { callId: 'c2', name: 'web_fetch', arguments: '{}' }, 1))
+    store.onEvent(ev('tool/result', {
+      message: { content: [{ type: 'tool-result', toolCallId: 'c2', content: [{ type: 'text', text: 'body' }] }] },
+    }, 2))
+    store.toggleVerboseToolDetail()
+
+    const panel = store.getSnapshot().items.at(-1)
+    expect(panel?.kind === 'panel' && panel.lines[0]).toBe('body')
+  })
+})

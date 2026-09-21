@@ -497,6 +497,10 @@ export function InputBox(props: InputBoxProps): ReactElement {
       store.toggleVerboseTranscript()
       return
     }
+    if (key.ctrl && input === 't') {
+      store.toggleThinking()
+      return
+    }
 
     // Alt/Option+Up recalls the newest unclaimed message into the editor.
     if (key.upArrow && key.meta) {
